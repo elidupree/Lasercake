@@ -92,7 +92,9 @@ struct ztree_ops {
   typedef impl::object_metadata<CoordinateBits, NumDimensions> object_metadata;
   typedef pair<const ObjectIdentifier, object_metadata> id_and_bbox_type;
   typedef id_and_bbox_type* id_and_bbox_ptr;
-  
+
+  typedef typename boost::int_t<CoordinateBits>::fast CoordinateSignedType;
+  typedef impl::hack_get_collisions_result_entry<ObjectIdentifier, CoordinateSignedType> hack_get_collisions_result_entry;
   
   // A call to insert_zboxes_from_bbox() might be more clearly written
   //   for(zbox zb : zboxes_from_bbox(bbox)) {
@@ -267,6 +269,249 @@ struct ztree_ops {
       zget_objects_overlapping(tree->child1.get(), results, bitmap_indicating_found_results, bbox);
     }
   }
+  // TODO: Dehackify these and especially remove duplicate code within zhack_get_collisions and with zhack_get_collisions_velocityless.
+  static void zhack_get_collisions(
+        ztree_node const* tree,
+        std::vector<hack_get_collisions_result_entry>& results,
+        borrowed_bitset& bitmap_indicating_found_results,
+        bounding_box const& bbox,
+        non_normalized_rational<CoordinateSignedType> start_time,
+        non_normalized_rational<CoordinateSignedType> end_time,
+        non_normalized_rational<CoordinateSignedType> original_start_time,
+        non_normalized_rational<CoordinateSignedType> original_end_time
+                                  ) {
+    if (!tree) std::cerr << "Eliminated endnode\n";
+    if (tree) {
+      static const num_coordinates_type NumSpaceDimensions = (NumDimensions / 2);
+      for (num_coordinates_type dim = 0; dim < NumSpaceDimensions; ++dim) {
+        const num_coordinates_type vel = dim + NumSpaceDimensions;
+        // restrict possible_times to the times when this node can overlap bbv in the x dimension
+        const bounding_box node_bb = tree->here.get_bbox();
+        if ((CoordinateSignedType(node_bb.max(vel)) < CoordinateSignedType(node_bb.min(vel))) ||
+          (CoordinateSignedType(node_bb.max(dim)) < CoordinateSignedType(node_bb.min(dim)))) {
+          // Nodes that break the space boundary also break the math. Skip them.
+        }
+        else if (CoordinateSignedType(node_bb.max(vel)) < CoordinateSignedType(bbox.min(vel))) {
+          const CoordinateSignedType foo = (CoordinateSignedType(bbox.min(vel)) - ((CoordinateSignedType(node_bb.min(dim)) > CoordinateSignedType(bbox.max(dim))) ? CoordinateSignedType(node_bb.min(vel)) : CoordinateSignedType(node_bb.max(vel))));
+          //std::cerr << "blarghablargh" << CoordinateSignedType(bbox.min(vel)) << ", " << CoordinateSignedType(node_bb.min(dim)) << ", " << CoordinateSignedType(bbox.max(dim)) << ", " << CoordinateSignedType(node_bb.min(vel)) << ", " << CoordinateSignedType(node_bb.max(vel)) << ", " << foo << "\n";
+          assert(foo != 0);
+          const non_normalized_rational<CoordinateSignedType> min_here(
+            CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+            foo
+          );
+          const non_normalized_rational<CoordinateSignedType> max_here(
+            CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+            CoordinateSignedType(bbox.min(vel)) - ((CoordinateSignedType(node_bb.max(dim)) > CoordinateSignedType(bbox.min(dim))) ? CoordinateSignedType(node_bb.max(vel)) : CoordinateSignedType(node_bb.min(vel)))
+          );
+          if (min_here > start_time) start_time = min_here;
+          if (max_here <   end_time)   end_time = max_here;
+        }
+        else if (CoordinateSignedType(node_bb.min(vel)) > CoordinateSignedType(bbox.min(vel))) {
+          const CoordinateSignedType foo = (CoordinateSignedType(bbox.min(vel)) - ((CoordinateSignedType(node_bb.max(dim)) > CoordinateSignedType(bbox.min(dim))) ? CoordinateSignedType(node_bb.min(vel)) : CoordinateSignedType(node_bb.max(vel))));
+          // std::cerr << "flerhaueiHUAEVHV" << CoordinateSignedType(bbox.min(vel)) << ", " << CoordinateSignedType(node_bb.max(dim)) << ", " << CoordinateSignedType(bbox.min(dim)) << ", " << CoordinateSignedType(node_bb.min(vel)) << ", " << CoordinateSignedType(node_bb.max(vel)) << ", " << foo << "\n";
+          assert(foo != 0); 
+          const non_normalized_rational<CoordinateSignedType> min_here(
+            CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+            foo
+          );
+          const non_normalized_rational<CoordinateSignedType> max_here(
+            CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+            CoordinateSignedType(bbox.min(vel)) - ((CoordinateSignedType(node_bb.min(dim)) > CoordinateSignedType(bbox.max(dim))) ? CoordinateSignedType(node_bb.max(vel)) : CoordinateSignedType(node_bb.min(vel)))
+          );
+          if (min_here > start_time) start_time = min_here;
+          if (max_here <   end_time)   end_time = max_here;
+        }
+        else {
+          // This is what we call a "split node"; it could be going in either direction relative to bbv,
+          // and so its possible overlaps are not an interval, but the complement of an interval:
+          // the "start_time" here comes _after_ the "stop_time".
+          // (or, in the case where its x values also overlap, its possible overlaps are every time.)
+
+          if ((bbox.min(vel) == node_bb.min(vel)) || (bbox.min(vel) == node_bb.max(vel))) {
+            // HACK - I'm not sure what to do with these cases, so I ignore them!
+            // TODO fix this
+          }
+          else if (CoordinateSignedType(node_bb.min(dim)) > CoordinateSignedType(bbox.max(dim))) {
+            const non_normalized_rational<CoordinateSignedType> exit_time(
+              CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+              CoordinateSignedType(bbox.min(vel)) - CoordinateSignedType(node_bb.max(vel))
+            );
+            const non_normalized_rational<CoordinateSignedType> reentry_time(
+              CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+              CoordinateSignedType(bbox.min(vel)) - CoordinateSignedType(node_bb.min(vel))
+            );
+                 if (reentry_time >   end_time) { if (   exit_time <   end_time) {   end_time =    exit_time; } }
+            else if (   exit_time < start_time) { if (reentry_time > start_time) { start_time = reentry_time; } }
+            else {
+              // In this situation, the proper resulting shape would be not one interval, but TWO intervals.
+              // To keep it simple, we just leave it as a single contiguous interval.
+            }
+          }
+          else if (CoordinateSignedType(node_bb.max(dim)) < CoordinateSignedType(bbox.min(dim))) {
+            const non_normalized_rational<CoordinateSignedType> exit_time(
+              CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+              CoordinateSignedType(bbox.min(vel)) - CoordinateSignedType(node_bb.min(vel))
+            );
+            const non_normalized_rational<CoordinateSignedType> reentry_time(
+              CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+              CoordinateSignedType(bbox.min(vel)) - CoordinateSignedType(node_bb.max(vel))
+            );
+                 if (reentry_time >   end_time) { if (   exit_time <   end_time) {   end_time =    exit_time; } }
+            else if (   exit_time < start_time) { if (reentry_time > start_time) { start_time = reentry_time; } }
+            else {
+              // In this situation, the proper resulting shape would be not one interval, but TWO intervals.
+              // To keep it simple, we just leave it as a single contiguous interval.
+            }
+          }
+        }
+
+        if (end_time >= start_time) {
+          for(id_and_bbox_ptr id_and_bbox : tree->objects_here) {
+            if (!bitmap_indicating_found_results.test(id_and_bbox->second.numeric_id)) {
+              bitmap_indicating_found_results.set(id_and_bbox->second.numeric_id);
+
+              hack_get_collisions_result_entry entry(id_and_bbox->first, original_start_time, original_end_time);
+              bounding_box const& obbox = id_and_bbox->second.bbox;
+              for (num_coordinates_type dim = 0; dim < NumSpaceDimensions; ++dim) {
+                const num_coordinates_type vel = dim + NumSpaceDimensions;
+                const CoordinateSignedType rel_vel = bbox.min(vel) - obbox.min(vel);
+                if (rel_vel == 0) {
+                  if (bbox.min(dim) > obbox.max(dim) || bbox.max(dim) < obbox.min(dim)) {
+                    // hack - they never intersect
+                    entry.first_collision_moment = non_normalized_rational<CoordinateSignedType>(1);
+                    entry. last_collision_moment = non_normalized_rational<CoordinateSignedType>(0);
+                    break;
+                  }
+                  else {
+                    // they always intersect in this dimension
+                  }
+                }
+                else {
+                  const non_normalized_rational<CoordinateSignedType> min_here(
+                    (rel_vel > 0) ? (CoordinateSignedType(obbox.min(dim)) - CoordinateSignedType(bbox.max(dim))) : (CoordinateSignedType(obbox.max(dim)) - CoordinateSignedType(bbox.min(dim))),
+                    rel_vel
+                  );
+                  const non_normalized_rational<CoordinateSignedType> max_here(
+                    (rel_vel > 0) ? (CoordinateSignedType(obbox.max(dim)) - CoordinateSignedType(bbox.min(dim))) : (CoordinateSignedType(obbox.min(dim)) - CoordinateSignedType(bbox.max(dim))),
+                    rel_vel
+                  );
+                  if (min_here > entry.first_collision_moment) entry.first_collision_moment = min_here;
+                  if (max_here < entry. last_collision_moment) entry. last_collision_moment = max_here;
+                  if (entry.first_collision_moment > entry.last_collision_moment) break;
+                }
+              }
+              if (entry.first_collision_moment <= entry.last_collision_moment) {
+                results.push_back(entry);
+              }
+            }
+          }
+
+          std::cerr << "Trying children\n";
+          zhack_get_collisions(tree->child0.get(), results, bitmap_indicating_found_results, bbox, start_time, end_time, original_start_time, original_end_time);
+          zhack_get_collisions(tree->child1.get(), results, bitmap_indicating_found_results, bbox, start_time, end_time, original_start_time, original_end_time);
+        }
+        else {
+          std::cerr << "Eliminated non-match\n";
+        }
+      }
+    }
+  }
+  static void zhack_get_collisions_velocityless(
+        ztree_node const* tree,
+        std::vector<hack_get_collisions_result_entry>& results,
+        borrowed_bitset& bitmap_indicating_found_results,
+        bounding_box const& bbox,
+        bounding_box const& bbox_vel,
+        non_normalized_rational<CoordinateSignedType> start_time,
+        non_normalized_rational<CoordinateSignedType> end_time,
+        non_normalized_rational<CoordinateSignedType> original_start_time,
+        non_normalized_rational<CoordinateSignedType> original_end_time
+                                  ) {
+    if (tree) {
+      for (num_coordinates_type dim = 0; dim < NumDimensions; ++dim) {
+        // restrict possible_times to the times when this node can overlap bbv in the x dimension
+        const bounding_box node_bb = tree->here.get_bbox();
+        if (CoordinateSignedType(node_bb.max(dim)) < CoordinateSignedType(node_bb.min(dim))) {
+          // Nodes that break the space boundary also break the math. Skip them.
+        }
+        else if (0 < CoordinateSignedType(bbox_vel.min(dim))) {
+          const non_normalized_rational<CoordinateSignedType> min_here(
+            CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+            CoordinateSignedType(bbox_vel.min(dim))
+          );
+          const non_normalized_rational<CoordinateSignedType> max_here(
+            CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+            CoordinateSignedType(bbox_vel.min(dim))
+          );
+          if (min_here > start_time) start_time = min_here;
+          if (max_here <   end_time)   end_time = max_here;
+        }
+        else if (0 > CoordinateSignedType(bbox_vel.min(dim))) {
+          const non_normalized_rational<CoordinateSignedType> min_here(
+            CoordinateSignedType(node_bb.max(dim)) - CoordinateSignedType(bbox.min(dim)),
+            CoordinateSignedType(bbox_vel.min(dim))
+          );
+          const non_normalized_rational<CoordinateSignedType> max_here(
+            CoordinateSignedType(node_bb.min(dim)) - CoordinateSignedType(bbox.max(dim)),
+            CoordinateSignedType(bbox_vel.min(dim))
+          );
+          if (min_here > start_time) start_time = min_here;
+          if (max_here <   end_time)   end_time = max_here;
+        }
+        else {
+          assert(0 == bbox_vel.min(dim));
+          if ((CoordinateSignedType(node_bb.max(dim)) < CoordinateSignedType(bbox.min(dim))) || (CoordinateSignedType(node_bb.min(dim)) > CoordinateSignedType(bbox.max(dim)))) {
+            // hack - they never intersect
+            start_time = non_normalized_rational<CoordinateSignedType>(1);
+              end_time = non_normalized_rational<CoordinateSignedType>(0);
+          }
+        }
+
+        if (end_time >= start_time) {
+          for(id_and_bbox_ptr id_and_bbox : tree->objects_here) {
+            if (!bitmap_indicating_found_results.test(id_and_bbox->second.numeric_id)) {
+              bitmap_indicating_found_results.set(id_and_bbox->second.numeric_id);
+
+              hack_get_collisions_result_entry entry(id_and_bbox->first, original_start_time, original_end_time);
+              bounding_box const& obbox = id_and_bbox->second.bbox;
+              for (num_coordinates_type dim = 0; dim < NumDimensions; ++dim) {
+                if (bbox_vel.min(dim) == 0) {
+                  if ((CoordinateSignedType(bbox.min(dim)) > CoordinateSignedType(obbox.max(dim))) || (CoordinateSignedType(bbox.max(dim)) < CoordinateSignedType(obbox.min(dim)))) {
+                    // hack - they never intersect
+                    entry.first_collision_moment = non_normalized_rational<CoordinateSignedType>(1);
+                    entry. last_collision_moment = non_normalized_rational<CoordinateSignedType>(0);
+                    break;
+                  }
+                  else {
+                    // they always intersect in this dimension
+                  }
+                }
+                else {
+                  const non_normalized_rational<CoordinateSignedType> min_here(
+                    (CoordinateSignedType(bbox_vel.min(dim)) > 0) ? (CoordinateSignedType(obbox.min(dim)) - CoordinateSignedType(bbox.max(dim))) : (CoordinateSignedType(obbox.max(dim)) - CoordinateSignedType(bbox.min(dim))),
+                    CoordinateSignedType(bbox_vel.min(dim))
+                  );
+                  const non_normalized_rational<CoordinateSignedType> max_here(
+                    (CoordinateSignedType(bbox_vel.min(dim)) > 0) ? (CoordinateSignedType(obbox.max(dim)) - CoordinateSignedType(bbox.min(dim))) : (CoordinateSignedType(obbox.min(dim)) - CoordinateSignedType(bbox.max(dim))),
+                    CoordinateSignedType(bbox_vel.min(dim))
+                  );
+                  if (min_here > entry.first_collision_moment) entry.first_collision_moment = min_here;
+                  if (max_here < entry. last_collision_moment) entry. last_collision_moment = max_here;
+                  if (entry.first_collision_moment > entry.last_collision_moment) break;
+                }
+              }
+              if (entry.first_collision_moment <= entry.last_collision_moment) {
+                results.push_back(entry);
+              }
+            }
+          }
+
+          zhack_get_collisions_velocityless(tree->child0.get(), results, bitmap_indicating_found_results, bbox, bbox_vel, start_time, end_time, original_start_time, original_end_time);
+          zhack_get_collisions_velocityless(tree->child1.get(), results, bitmap_indicating_found_results, bbox, bbox_vel, start_time, end_time, original_start_time, original_end_time);
+        }
+      }
+    }
+  }
 
   static void look_at_counts_impl(ztree_node const* tree, std::map<long, long>& counts) {
     if(tree) {
@@ -346,6 +591,26 @@ get_objects_overlapping(std::vector<ObjectIdentifier>& results, bounding_box con
 template<typename ObjectIdentifier, num_bits_type CoordinateBits, num_coordinates_type NumDimensions>
 INLINE_IF_HEADER
 void bbox_collision_detector<ObjectIdentifier, CoordinateBits, NumDimensions>::
+hack_get_collisions(std::vector<hack_get_collisions_result_entry>& results, bounding_box const& bbox, non_normalized_rational<CoordinateSignedType> start_time, non_normalized_rational<CoordinateSignedType> end_time)const {
+  borrowed_bitset bitmap_indicating_found_results(objects_sequence_.size());
+std::cerr << "=========BEGIN===========\n";
+  impl::ztree_ops<ObjectIdentifier, CoordinateBits, NumDimensions>::zhack_get_collisions(
+        objects_tree_.get(), results, bitmap_indicating_found_results, bbox, start_time, end_time, start_time, end_time);
+}
+
+template<typename ObjectIdentifier, num_bits_type CoordinateBits, num_coordinates_type NumDimensions>
+INLINE_IF_HEADER
+void bbox_collision_detector<ObjectIdentifier, CoordinateBits, NumDimensions>::
+hack_get_collisions_velocityless(std::vector<hack_get_collisions_result_entry>& results, bounding_box const& bbox, bounding_box const& bbox_vel, non_normalized_rational<CoordinateSignedType> start_time, non_normalized_rational<CoordinateSignedType> end_time)const {
+  borrowed_bitset bitmap_indicating_found_results(objects_sequence_.size());
+
+  impl::ztree_ops<ObjectIdentifier, CoordinateBits, NumDimensions>::zhack_get_collisions_velocityless(
+        objects_tree_.get(), results, bitmap_indicating_found_results, bbox, bbox_vel, start_time, end_time, start_time, end_time);
+}
+
+template<typename ObjectIdentifier, num_bits_type CoordinateBits, num_coordinates_type NumDimensions>
+INLINE_IF_HEADER
+void bbox_collision_detector<ObjectIdentifier, CoordinateBits, NumDimensions>::
 print_debug_summary_information(std::ostream& os)const {
   os << this->size() << " objects, in piles of [[[\n";
   impl::ztree_ops<ObjectIdentifier, CoordinateBits, NumDimensions>::look_at_counts(objects_tree_.get(), os);
@@ -390,6 +655,7 @@ bbox_collision_detector<ObjectIdentifier, CoordinateBits, NumDimensions>::
 namespace collision_detector {
 template class bbox_collision_detector<object_or_tile_identifier, 64, 3>;
 template class bbox_collision_detector<object_identifier, 64, 3>;
+template class bbox_collision_detector<object_identifier, 64, 6>;
 
 #if !LASERCAKE_NO_SELF_TESTS
 // for bbox_collision_detector_tests.cpp

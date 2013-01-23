@@ -28,6 +28,8 @@ typedef lasercake_int<int64_t>::type time_int_type;
 typedef non_normalized_rational<time_int_type> time_type;
 typedef faux_optional<time_type> optional_time;
 
+typedef bbox_collision_detector<object_identifier, 64, 6> detector_of_collisions_between_moving_objects_type;
+
 vector3<fine_scalar> movement_delta_from_start_to(vector3<fine_scalar> const& velocity, time_type end_time) {
   // Round to nearest:
   return vector3<fine_scalar>(
@@ -234,29 +236,52 @@ void update_object_for_whole_frame(boost::shared_ptr<mobile_object>& obj, shape&
     //std::cerr << "!Moving object by " << delta << "\n";
 }
 
-void collect_collisions(time_type min_time, bool erase_old_sweep, object_identifier id, boost::shared_ptr<mobile_object> const& obj, shape const* personal_space_shape, world &w, objects_collision_detector& sweep_box_cd, std::priority_queue<collision_info, std::vector<collision_info>>& anticipated_collisions, std::unordered_map<object_or_tile_identifier, moving_object_info>& objects_info, objects_map<mobile_object>::type const& moving_objects) {
-  if (erase_old_sweep) sweep_box_cd.erase(id);
-  
-  bounding_box sweep_bounds = personal_space_shape->bounds();
-  // Round up, so that our sweep bounds contains all area we might reach.
-  auto delta = movement_delta_rounding_up(obj->velocity(), time_type(1) - min_time);
-  if (delta != vector3<fine_scalar>(0,0,0)) {
-    sweep_bounds.translate(delta);
-    sweep_bounds.combine_with(personal_space_shape->bounds());
-    assert(sweep_bounds != personal_space_shape->bounds());
-  }
-  
-  w.ensure_realization_of_space(sweep_bounds, CONTENTS_AND_LOCAL_CACHES_ONLY);
+void collect_collisions(time_type min_time, bool erase_old_sweep, object_identifier id, boost::shared_ptr<mobile_object> const& obj, shape const* personal_space_shape, world &w, detector_of_collisions_between_moving_objects_type& detector_of_collisions_between_moving_objects, std::priority_queue<collision_info, std::vector<collision_info>>& anticipated_collisions, std::unordered_map<object_or_tile_identifier, moving_object_info>& objects_info, objects_map<mobile_object>::type const& moving_objects) {
+  if (erase_old_sweep) detector_of_collisions_between_moving_objects.erase(id);
 
+  const auto i1 = objects_info.find(id);
+  const time_type ltu1 = (i1 == objects_info.end()) ? time_type(0) : i1->second.last_time_updated;
+  assert(ltu1 == min_time); // TODO just use this instead and not pass the min_time argument?
+  
+  //{
+    bounding_box sweep_bounds = personal_space_shape->bounds();
+    // Round up, so that our sweep bounds contains all area we might reach.
+    auto delta = movement_delta_rounding_up(obj->velocity(), time_type(1) - min_time);
+    if (delta != vector3<fine_scalar>(0,0,0)) {
+      sweep_bounds.translate(delta);
+      sweep_bounds.combine_with(personal_space_shape->bounds());
+      assert(sweep_bounds != personal_space_shape->bounds());
+    }
+    
+    w.ensure_realization_of_space(sweep_bounds, CONTENTS_AND_LOCAL_CACHES_ONLY);
+  //}
+  
+  // we don't tell the collision detector about the velocity scale factor, so we tell it scaled times instead.
+  // it thinks the speeds are faster, so we make the time less.
+  // We don't use the time output for anything (TODO: we could; should we?) so it doesn't matter that that's similarly distorted.
+  const time_type fake_min(min_time.numerator, min_time.denominator * velocity_scale_factor);
+  const time_type fake_max(1, velocity_scale_factor);
+
+  detector_of_collisions_between_moving_objects_type::bounding_box::coordinate_array min;
+  detector_of_collisions_between_moving_objects_type::bounding_box::coordinate_array max;
+  for (int dim = 0; dim < 3; ++dim) {
+    min[dim] = personal_space_shape->bounds().min(dim) - obj->velocity()(dim) * fake_min.numerator / fake_min.denominator;
+    max[dim] = personal_space_shape->bounds().max(dim) - obj->velocity()(dim) * fake_min.numerator / fake_min.denominator + 1;
+    min[dim + 3] = obj->velocity()(dim);
+    max[dim + 3] = obj->velocity()(dim);
+  }
+  detector_of_collisions_between_moving_objects_type::bounding_box moving_bb = detector_of_collisions_between_moving_objects_type::bounding_box::min_and_max(min, max);
+  
   // Did this object (1) potentially pass through another object's sweep
   // and/or (2) potentially hit a stationary object/tile?
   //
   // These checks are conservative and bounding-box based.
-  vector<object_identifier> objects_this_could_collide_with;
-  sweep_box_cd.get_objects_overlapping(objects_this_could_collide_with, sweep_bounds);
-  w.objects_exposed_to_collision().get_objects_overlapping(objects_this_could_collide_with, sweep_bounds);
+  vector<objects_collision_detector::hack_get_collisions_result_entry> objects_this_could_collide_with;
+  detector_of_collisions_between_moving_objects.hack_get_collisions(objects_this_could_collide_with, moving_bb, fake_min, fake_max);
+  w.objects_exposed_to_collision().hack_get_collisions_velocityless(objects_this_could_collide_with, personal_space_shape->bounds(), bounding_box(obj->velocity()), fake_min, fake_max);
   
-  for (object_identifier other_id : objects_this_could_collide_with) {
+  for (auto const& other_entry : objects_this_could_collide_with) {
+    object_identifier const& other_id = other_entry.oid;
   /*std::cerr << "Warning: Doing paranoid checks, remove this;\n";
   for (auto const& p1 : moving_objects) {
     object_identifier other_id = p1.first;*/
@@ -269,9 +294,6 @@ void collect_collisions(time_type min_time, bool erase_old_sweep, object_identif
         other_velocity = (*other_obj)->velocity();
         //std::cerr << "Other velocity is relevant." << obj->velocity() << (*other_obj)->velocity();
       }
-      const auto i1 = objects_info.find(id);
-      const time_type ltu1 = (i1 == objects_info.end()) ? time_type(0) : i1->second.last_time_updated;
-      assert(ltu1 == min_time); // TODO just use this instead and not pass the min_time argument?
       const auto i2 = objects_info.find(other_id);
       const time_type ltu2 = (i2 == objects_info.end()) ? time_type(0) : i2->second.last_time_updated;
       if (auto result = get_first_moment_of_intersection(personal_space_shape, opss, obj->velocity(), other_velocity, ltu1, ltu2)) {
@@ -293,9 +315,6 @@ void collect_collisions(time_type min_time, bool erase_old_sweep, object_identif
   for (auto const& loc : tiles_this_could_collide_with) {
       //std::cerr << "Considering " << id << ", " << loc << "\n";
     shape t = tile_shape(loc.coords());
-    const auto i1 = objects_info.find(id);
-    const time_type ltu1 = (i1 == objects_info.end()) ? time_type(0) : i1->second.last_time_updated;
-    assert(ltu1 == min_time); // TODO just use this instead and not pass the min_time argument?
     if (auto result = get_first_moment_of_intersection(personal_space_shape, &t, obj->velocity(), vector3<fine_scalar>(0,0,0), ltu1, time_type(0))) {
       assert(result.time);
       assert(*result.time >= min_time);
@@ -308,7 +327,7 @@ void collect_collisions(time_type min_time, bool erase_old_sweep, object_identif
     }
   }
 
-  sweep_box_cd.insert(id, sweep_bounds);
+  detector_of_collisions_between_moving_objects.insert(id, moving_bb);
 }
 
 void assert_about_overlaps(objects_map<mobile_object>::type & moving_objects,
@@ -359,9 +378,10 @@ void update_moving_objects_impl(
   // Possibly omit them here somehow.
   for (auto& p : moving_objects) {
     p.second->velocity_ += gravity_acceleration;
+    objects_exposed_to_collision.erase(p.first);
   }
   
-  objects_collision_detector sweep_box_cd;
+  detector_of_collisions_between_moving_objects_type detector_of_collisions_between_moving_objects;
   std::priority_queue<collision_info, std::vector<collision_info>> anticipated_collisions;
   std::unordered_map<object_or_tile_identifier, moving_object_info> objects_info;
   
@@ -381,7 +401,7 @@ void update_moving_objects_impl(
         }
       }
       
-      collect_collisions(time_type(0), false, id, obj, personal_space_shape, w, sweep_box_cd, anticipated_collisions, objects_info, moving_objects);
+      collect_collisions(time_type(0), false, id, obj, personal_space_shape, w, detector_of_collisions_between_moving_objects, anticipated_collisions, objects_info, moving_objects);
       
     }
   }
@@ -508,7 +528,7 @@ void update_moving_objects_impl(
             //     deleted it and not replaced it.
             // Note: Duplicate comment with the below
             if (inf2.invalidation_counter > collision.validation2) {
-              collect_collisions(collision.time, true, oid2, obj2, o2pss, w, sweep_box_cd, anticipated_collisions, objects_info, moving_objects);
+              collect_collisions(collision.time, true, oid2, obj2, o2pss, w, detector_of_collisions_between_moving_objects, anticipated_collisions, objects_info, moving_objects);
             }
            }
            else {
@@ -548,7 +568,7 @@ void update_moving_objects_impl(
           //     deleted it and not replaced it.
           // Note: Duplicate comment with the above
           if (inf1.invalidation_counter > collision.validation1) {
-            collect_collisions(collision.time, true, oid1, obj1, o1pss, w, sweep_box_cd, anticipated_collisions, objects_info, moving_objects);
+            collect_collisions(collision.time, true, oid1, obj1, o1pss, w, detector_of_collisions_between_moving_objects, anticipated_collisions, objects_info, moving_objects);
           }
         }
       }
@@ -576,7 +596,6 @@ void update_moving_objects_impl(
     // Update the collision detector entries
     bounding_box new_bounds = opss->bounds();
     new_bounds.combine_with(ods->bounds());
-    objects_exposed_to_collision.erase(oid);
     objects_exposed_to_collision.insert(oid, new_bounds);
   }
   //assert_about_overlaps(moving_objects, personal_space_shapes, objects_info, false);

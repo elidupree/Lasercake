@@ -172,7 +172,16 @@ namespace impl {
 
   template<typename ObjectIdentifier, num_bits_type CoordinateBits, num_coordinates_type NumDimensions, typename GetCost>
   struct iteration_types;
+  
+  template<typename ObjectIdentifier, typename Coordinate>
+  struct hack_get_collisions_result_entry {
+    hack_get_collisions_result_entry(ObjectIdentifier oid, non_normalized_rational<Coordinate> first_collision_moment, non_normalized_rational<Coordinate> last_collision_moment):oid(oid),first_collision_moment(first_collision_moment),last_collision_moment(last_collision_moment){}
+    ObjectIdentifier oid;
+    non_normalized_rational<Coordinate> first_collision_moment;
+    non_normalized_rational<Coordinate> last_collision_moment;
+  };
 }
+
 
 // bbox_collision_detector is a collection of pairs of
 //   ObjectIdentifier and bounding_box<CoordinateBits, NumDimensions>
@@ -267,6 +276,10 @@ public:
   // as its maximum width among all dimensions never count as nearby.
   void get_objects_overlapping(std::vector<ObjectIdentifier>& results, bounding_box const& bbox)const;
 
+  typedef typename boost::int_t<CoordinateBits>::fast CoordinateSignedType;
+  typedef impl::hack_get_collisions_result_entry<ObjectIdentifier, CoordinateSignedType> hack_get_collisions_result_entry;
+  void hack_get_collisions(std::vector<hack_get_collisions_result_entry>& results, bounding_box const& bbox, non_normalized_rational<CoordinateSignedType> start_time, non_normalized_rational<CoordinateSignedType> end_time)const; // ignores velocity values' 'size'
+  void hack_get_collisions_velocityless(std::vector<hack_get_collisions_result_entry>& results, bounding_box const& bbox, bounding_box const& bbox_vel, non_normalized_rational<CoordinateSignedType> start_time, non_normalized_rational<CoordinateSignedType> end_time)const; // ignores velocity values' 'size'
 
   // *** Custom ordered and/or filtered search and iteration ***
   //
