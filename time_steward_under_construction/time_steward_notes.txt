@@ -12,6 +12,7 @@ In a typical simulation model, the simulation would advance by time steps, and i
 
 
 
+
 Each field may have one or more watchers. A watcher is a function
 
 (Entity ID, (Entity ID, field ID) -> field value) -> maybe (time, event)
@@ -208,3 +209,34 @@ return result;
 
 
 } /*struct fluid_dynamics*/
+
+
+
+cell {
+  //inferable from other stuff
+  //mass:: polynomial-ish
+  //momentum:: polynomial-ish vector
+  //mass times position:: polynomial-ish vector
+  
+  time updated:: time
+  mass when updated:: mass
+  momentum when updated:: momentum vector
+  mass times position when updated:: mass times distance vector
+  
+  velocity for transfers:: vector
+  center of mass for transfers:: vector
+  }
+  
+cell: velocity for transfers <- velocity leeway, cell momentum/cell mass
+cell: center of mass for transfers <- center leeway, cell mass times position/cell mass
+
+transfer rate (cell, direction, type) =
+  velocity for transfers dot direction <= 0 -> 0
+  center of mass for transfers dot direction <= center of cell -> 0
+  otherwise ->
+    type = mass ->
+    
+//cell_momentum = cell.momentum when updated +
+time_function cell_momentum (cell const & Charlie) {
+  return Charlie.momentum when updated + (transfer_sum <momentum> (Charlie)/time)
+}
