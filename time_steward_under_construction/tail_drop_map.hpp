@@ -81,12 +81,13 @@ public:
       sorted_elements.pop_back ();
     }
 
+    remaining_sorted= sorted_elements.size ();
     for (value_type value: unsorted_elements) {
       if (value.first >key) {
         output (value);
       }
       else if (sorted_elements.empty () ||
-          value.first >= sorted_elements.back ().value.first) {
+          value.first >= sorted_elements [remaining_sorted-1].value.first) {
         sorted_elements.emplace_back (value);
       }
       else {
@@ -96,15 +97,19 @@ public:
         //if there IS a tail_drop that goes far enough back to
         //actually OUTPUT this element, we never have to do the rest
         //of the search in that scenario either.
-        size_t dump_location = sorted_elements.size ()>> 1;
+        size_t dump_location = remaining_sorted>> 1;
         while (sorted_elements [dump_location].value.first < value.first) {
-          dump_location = (dump_location + sorted_elements.size ()) >> 1;
+          dump_location = (dump_location + remaining_sorted) >> 1;
         }
         sorted_elements [dump_location].unsorted_elements_before_or_equal_this
           .push_back (value);
       }
     }
     unsorted_elements.clear ();
+    if (sorted_elements.size () >remaining_sorted + 1) {
+      std:: sort (sorted_elements [remaining_sorted], sorted_elements.end (),
+        [] (value_1, value_2) {return value_1.first <value_2.first});
+    }
   }
   
   void discard_head (key_type const & key) {
