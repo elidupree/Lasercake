@@ -108,7 +108,7 @@ public:
     unsorted_elements.clear ();
     if (sorted_elements.size () >remaining_sorted + 1) {
       std:: sort (sorted_elements [remaining_sorted], sorted_elements.end (),
-        [] (value_1, value_2) {return value_1.first <value_2.first});
+        [] (e1, e2) {return e1.value.first < e2.value.first});
     }
   }
   
