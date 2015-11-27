@@ -30,25 +30,28 @@ It implements only two operations:
 void insert (key, value), which inserts an element into the map, and
 tail_drop (key), which removes and returns all elements with keys after key, not necessarily in order.
 
-Inserting at the end is O(1) worst case.
-Inserting elsewhere is O(1), but incurs a debt of up to O(log n) which will be paid off later by tail_drop.
+Inserting at the end is O(1) amortized.
+Inserting elsewhere is O(1), but incurs a debt of O(log n) which will be paid off later by tail_drop.
 tail_drop is merely O(number of things returned), plus paying off the debt.
 
 Since the results of tail_drop don't actually need to be sorted,
 we delay all or part of the O(log n) cost of sorting for as long as we can,
 in the hopes of never having to pay it at all.
 
-There is also discard_head (key), which can be used to save memory by assuring the tail_drop_map that you won't query before key, so it can discard some data that it knows will never be used. However, it does not guarantee that all data before key will be discarded.
+There is also discard_head (key), which can be used to save memory 
+by assuring the tail_drop_map that you won't query before key, 
+so it can discard some data that it knows will never be used. 
+However, it does not guarantee that all data before key will be discarded.
 
 */
 
 template <typename key_type, typename mapped_type>
 class tail_drop_map {
 private:
+  typedef std:: pair <key_type, mapped_type> value_type;
   //the "bucket" type is used only for collecting unsorted elements
   //1 at a time, then eventually iterating them and dumping them all out.
-  typedef std:: vector bucket;
-  typedef std:: pair <key_type, mapped_type> value_type;
+  typedef std:: vector <value_type> bucket;
   
   struct sorted_element {
     sorted_element (value_type const & value): value (value) {}
