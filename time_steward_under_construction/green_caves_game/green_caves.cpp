@@ -44,6 +44,7 @@ using time_steward_system::none;
 typedef bounded_int_calculus::polynomial_with_origin<time_type, space_coordinate, 2> poly;
 typedef bounded_int_calculus::polynomial_with_origin<time_type, space_coordinate, 3> poly3;
 typedef bounded_int_calculus::finite_dimensional_vector<num_dimensions, space_coordinate> fd_vector;
+typedef fd_vector FD_vector;
 typedef bounded_int_calculus::finite_dimensional_vector<num_dimensions, double> double_vector;
 typedef bounded_int_calculus::finite_dimensional_vector<num_dimensions, poly> poly_fd_vector;
 
@@ -76,18 +77,8 @@ struct player_shape {
   poly_fd_vector center;
   space_coordinate radius;
 };
-enum wall_state {
-  UNDETERMINED,
-  WALL,
-  EMPTY,
-};
-struct wall_state_traits {
-  static inline wall_state null() { return UNDETERMINED; }
-};
-struct cave_state_traits {
-  static inline space_coordinate null() { return 0; }
-};
-
+struct wall_destroyed {
+static inline bool null () {return false;}};
 
 
 using time_steward_system::field;
@@ -98,8 +89,7 @@ typedef time_steward_system::fields_list<
   field<shot_trajectory, optional<poly_fd_vector>>,
   field<shot_tile, fd_vector>,
   field<tile_shots, persistent_siphash_id_set>,
-  field<wall_state, wall_state, wall_state_traits>,
-  cave_block
+  field<wall_destroyed, bool, wall_destroyed>
 > fields;
 typedef time_steward_system::time_steward<fields> time_steward;
 typedef time_steward::accessor accessor;
@@ -122,6 +112,96 @@ time_type when_nonneg(time_type start, Poly p) {
   while ((i != p.sign_interval_boundaries_end()) && (sign(p(*i)) == -1)) { ++i; }
   return (i != p.sign_interval_boundaries_end()) ? *i : never;
 }
+
+
+class cave_generator {
+private:
+  struct tile_info {
+    int64_t last_query;
+    entity_ID ID;
+    bool wall;
+    tile_info (): last_query (-1) {}
+  };
+  struct cave_block {
+    int64_t last_query;
+    std:: vector <cave> caves;
+    cave_block (): last_query (-1) {}
+  };
+public:
+  cave_generator (int64_t cache_size =100000, int64_t max_radius_in_tiles = 10, int64_t block_size = max_radius_in_tiles*2 + 12):
+    cache_size (cache_size),
+    max_radius_in_tiles (max_radius_in_tiles),
+    block_size (block_size), queries (0), last_prune (0) {}
+  
+  bool get (fd_vector tile) const {
+    ++ queries;
+
+    tile_info & result = tiles [tile];
+    if (result.last_query == -1) {
+      result.wall = true;
+      result.ID  = siphash_id::combining('t','i','l','e',tile(0),tile(1));
+      auto strategy =rounding_strategy<round_down, negative_continuous_with_positive>(); 
+      for (tile_coordinate x = divide(tile(0) - max_radius_in_tiles, block_size, strategy); x*block_size <= tile(0) + max_radius_in_tiles; x++) {
+        for (tile_coordinate y = divide (tile(1) - max_radius_in_tiles, strategy); y*block_size <= tile(1) + max_radius_in_tiles; y++) {
+          cave_block & b = caves [fd_vector(x,y)];
+          if (b. last_query == -1) {
+          
+siphash_random_generator rng(siphash_id:: combining (x, y));
+    for (tile_coordinate x2 =x* block_size; x2 < (x+1)* block_size; ++x2) {
+      for (tile_coordinate y2 = y* block_size; y2 < (y+1)* block_size;++y2) {
+        bool any_cave_here = (rng.random_bits(8) == 0) || ((x2 == 0) && (y2 == 0));
+        if (any_cave_here) {
+          space_coordinate cave_radius = tile_size*2 + rng.random_bits(tile_size_shift + 3);
+          assert (cave_radius < max_cave_radius_in_tiles*tile_size);
+          b->caves.emplace_back(fd_vector(x2,y2), cave_radius);
+        }
+      }
+    }
+
+          }
+          b. last_query = queries;
+          for (cave const& c : b.caves) {
+            if ((
+                  (c.center_tile(0) - tile(0))*(c.center_tile(0) - tile(0)) +
+                  (c.center_tile(1) - tile(1))*(c.center_tile(1) - tile(1))
+                )*tile_size*tile_size <= c.radius*c.radius) {
+              result.wall = false;
+              goto triplebreak;
+            }
+          }
+        }
+      }
+      triplebreak:;
+    }
+    result.last_query = queries;    
+    if (tiles.size () >cache_size) {
+      for (auto iterator = tiles.begin (); iterator != tiles.end ();) {
+        if (iterator -> last_query <queries - (cache_size/2))
+          iterator = tiles.erase (iterator);
+        else
+          ++iterator;
+      }
+      
+      for (auto iterator = caves.begin (); iterator != caves.end ();) {
+        if (iterator -> last_query <queries - (cache_size/2))
+          iterator = caves.erase (iterator);
+        else
+          ++iterator;
+      }
+
+    }
+  }
+
+private:
+  const int64_t cache_size;
+  const int64_t max_radius_in_tiles;
+  const int64_t block_size;  
+  mutable int64_t queries;
+  mutable int64_t last_prune;
+  mutable std:: unordered_map <FD_vector, tile_info> tiles;
+  mutable std:: unordered_map <FD_vector, cave_block> caves;
+};
+
 
 void anticipate_shot_moving(time_steward::accessor* accessor, entity_ref e, fd_vector tile);
 entity_ref tile_entity(time_steward::accessor* accessor, fd_vector tile, bool req_wall_state = true);
