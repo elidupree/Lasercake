@@ -32,7 +32,7 @@ tail_drop (key), which removes and returns all elements with keys after key, not
 
 Inserting at the end is O(1) amortized.
 Inserting elsewhere is O(1), but incurs a debt of O(log n) which will be paid off later by tail_drop.
-tail_drop is merely O(number of things returned), plus paying off the debt.
+tail_drop is merely O(number of things returned), plus paying off some of the debt.
 
 Since the results of tail_drop don't actually need to be sorted,
 we delay all or part of the O(log n) cost of sorting for as long as we can,
@@ -77,7 +77,7 @@ public:
       assert (unsorted_elements.empty ());
       return;
     }
-    while (sorted_elements.back ().value.first >key) {
+    while ((! sorted_elements.empty ()) && sorted_elements.back ().value.first >key) {
       bucket & spilling = sorted_elements.back ().unsorted_elements_before_or_equal_this;
       std:: move (spilling.begin (), spilling.end (), std:: back_inserter (unsorted_elements));
       output (sorted_elements.back ().value);
