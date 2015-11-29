@@ -64,14 +64,6 @@ class player_center_reference_tile {};
 class player_next_shot_time {};
 class tile_shots {};
 
-struct cave {
-  cave(fd_vector center_tile, space_coordinate radius):center_tile(center_tile),radius(radius){}
-  fd_vector center_tile;
-  space_coordinate radius;
-};
-struct cave_block {
-  std::vector<cave> caves;
-};
 struct player_shape {
   player_shape(poly_fd_vector center, space_coordinate radius):center(center),radius(radius){}
   
@@ -129,6 +121,11 @@ private:
     tile_info info;
     tile_info_inner (): last_query (-1) {}
   };
+  struct cave {
+  cave(fd_vector center_tile, int64_t radius):center_tile(center_tile),radius(radius){}
+  fd_vector center_tile;
+int64_t radius;
+};
   struct cave_block {
     int64_t last_query;
     std:: vector <cave> caves;
@@ -158,8 +155,8 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
       for (tile_coordinate y2 = y* block_size; y2 < (y+1)* block_size;++y2) {
         bool any_cave_here = (rng.random_bits(8) == 0) || ((x2 == 0) && (y2 == 0));
         if (any_cave_here) {
-          space_coordinate cave_radius = tile_size*2 + rng.random_bits(tile_size_shift + 3);
-          assert (cave_radius < max_radius_in_tiles*tile_size);
+          space_coordinate cave_radius = (1 <<20)*2 + rng.random_bits(20)*8;
+          assert (cave_radius < max_radius_in_tiles << 20);
           b.caves.emplace_back(fd_vector(x2,y2), cave_radius);
         }
       }
@@ -171,7 +168,7 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
             if ((
                   (c.center_tile(0) - tile(0))*(c.center_tile(0) - tile(0)) +
                   (c.center_tile(1) - tile(1))*(c.center_tile(1) - tile(1))
-                )*tile_size*tile_size <= c.radius*c.radius) {
+                ) << 40 <= c.radius*c.radius) {
               result.info.wall = false;
               goto triplebreak;
             }
