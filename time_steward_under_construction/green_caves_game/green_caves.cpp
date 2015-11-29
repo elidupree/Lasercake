@@ -155,7 +155,7 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
       for (tile_coordinate y2 = y* block_size; y2 < (y+1)* block_size;++y2) {
         bool any_cave_here = (rng.random_bits(8) == 0) || ((x2 == 0) && (y2 == 0));
         if (any_cave_here) {
-int64_t cave_radius = (1ULL <<20)*2 + rng.random_bits(20)*8;
+int64_t cave_radius = (1ULL <<20)*max_radius_in_tiles /4 + rng.random_bits(20)*3/4;
           assert (cave_radius < max_radius_in_tiles << 20);
           b.caves.emplace_back(fd_vector(x2,y2), cave_radius);
         }
