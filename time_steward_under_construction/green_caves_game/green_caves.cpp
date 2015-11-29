@@ -35,6 +35,7 @@ const time_type never = hack_time_steward::never;
 const time_type min_time = hack_time_steward::min_time;
 const time_type max_time = hack_time_steward::max_time;
 typedef time_steward_system::entity_id entity_id;
+typedef time_steward_system::entity_id entity_ID;
 
 typedef int64_t space_coordinate;
 typedef int64_t tile_coordinate;
@@ -134,7 +135,7 @@ private:
     cave_block (): last_query (-1) {}
   };
 public:
-  cave_generator (int64_t cache_size =100000, int64_t max_radius_in_tiles = 10, int64_t block_size = max_radius_in_tiles*2 + 12):
+  cave_generator (int64_t cache_size =100000, int64_t max_radius_in_tiles = 10, int64_t block_size = 32):
     cache_size (cache_size),
     max_radius_in_tiles (max_radius_in_tiles),
     block_size (block_size), queries (0){}
@@ -148,7 +149,7 @@ public:
       result.info.ID  = siphash_id::combining('t','i','l','e',tile(0),tile(1));
       auto strategy =rounding_strategy<round_down, negative_continuous_with_positive>(); 
       for (tile_coordinate x = divide(tile(0) - max_radius_in_tiles, block_size, strategy); x*block_size <= tile(0) + max_radius_in_tiles; x++) {
-        for (tile_coordinate y = divide (tile(1) - max_radius_in_tiles, strategy); y*block_size <= tile(1) + max_radius_in_tiles; y++) {
+        for (tile_coordinate y = divide (tile(1) - max_radius_in_tiles, block_size, strategy); y*block_size <= tile(1) + max_radius_in_tiles; y++) {
           cave_block & b = caves [fd_vector(x,y)];
           if (b. last_query == -1) {
           
@@ -158,8 +159,8 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
         bool any_cave_here = (rng.random_bits(8) == 0) || ((x2 == 0) && (y2 == 0));
         if (any_cave_here) {
           space_coordinate cave_radius = tile_size*2 + rng.random_bits(tile_size_shift + 3);
-          assert (cave_radius < max_cave_radius_in_tiles*tile_size);
-          b->caves.emplace_back(fd_vector(x2,y2), cave_radius);
+          assert (cave_radius < max_radius_in_tiles*tile_size);
+          b.caves.emplace_back(fd_vector(x2,y2), cave_radius);
         }
       }
     }
@@ -182,14 +183,14 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
     result.last_query = queries;    
     if (tiles.size () >cache_size) {
       for (auto iterator = tiles.begin (); iterator != tiles.end ();) {
-        if (iterator -> last_query <queries - (cache_size/2))
+        if (iterator -> second.last_query <queries - (cache_size/2))
           iterator = tiles.erase (iterator);
         else
           ++iterator;
       }
       
       for (auto iterator = caves.begin (); iterator != caves.end ();) {
-        if (iterator -> last_query <queries - (cache_size/2))
+        if (iterator -> second.last_query <queries - (cache_size/2))
           iterator = caves.erase (iterator);
         else
           ++iterator;
@@ -204,15 +205,15 @@ private:
   const int64_t max_radius_in_tiles;
   const int64_t block_size;  
   mutable int64_t queries;
-  mutable std:: unordered_map <FD_vector, tile_info> tiles;
+  mutable std:: unordered_map <FD_vector, tile_info_inner> tiles;
   mutable std:: unordered_map <FD_vector, cave_block> caves;
 };
 
 cave_generator generator;
 
-tile_info get_tile (time_steward:: accessor*accessor, FD_vector tile) {
-  tile_info result = generator.get (tile);
-  if (result.wall && accessor -> get <wall_destroyed> (result .ID)) {
+cave_generator::tile_info get_tile (time_steward:: accessor*accessor, FD_vector tile) {
+  cave_generator::tile_info result = generator.get (tile);
+  if (result.wall && accessor -> get <wall_destroyed> (accessor -> get(result .ID))) {
     result.wall = false;
   }
   return result;

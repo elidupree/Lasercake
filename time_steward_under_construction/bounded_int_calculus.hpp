@@ -823,38 +823,14 @@ public:
     for (int i = 0; i < num_dimensions; ++i) data[i] *= other; }
   
   template <int vector_num_dimensions, typename vector_coordinate_type, typename factor_type>
-  friend auto operator*(finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector, factor_type const & factor) {
-    finite_dimensional_vector <vector_num_dimensions, decltype (std:: declval <vector_coordinate_type> ()*factor) result;
-    for (int dimension = 0; dimension <num_dimensions; ++ dimension) {
-      result [dimension] = vector (dimension)*factor;
-    }
-    return result;
-  }
+  friend auto operator*(finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector, factor_type const & factor);
   template <int vector_num_dimensions, typename vector_coordinate_type, typename factor_type>
-  friend auto operator*(factor_type const & factor, finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector) {
-    finite_dimensional_vector <vector_num_dimensions, decltype (factor*std:: declval <vector_coordinate_type> ()) result;
-    for (int dimension = 0; dimension <num_dimensions; ++ dimension) {
-      result [dimension] = factor*vector (dimension);
-    }
-    return result;
-  }
+  friend auto operator*(factor_type const & factor, finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector);
   
   template <int shared_num_dimensions, typename coordinate_type_1, typename coordinate_type_2>
-  friend auto operator+ (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2) {
-    finite_dimensional_vector <shared_num_dimensions, decltype (std::declval <coordinate_type_1> () + std:: declval <coordinate_type_2> ())> result;
-    for (int dimension = 0; dimension <num_dimensions; ++ dimension) {
-      result [dimension] = vector_1 (dimension) + vector_2 (dimension);
-    }
-    return result;
-  }
+  friend auto operator+ (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2);
   template <int shared_num_dimensions, typename coordinate_type_1, typename coordinate_type_2>
-  friend auto operator- (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2) {
-    finite_dimensional_vector <shared_num_dimensions, decltype (std::declval <coordinate_type_1> () - std:: declval <coordinate_type_2> ())> result;
-    for (int dimension = 0; dimension <num_dimensions; ++ dimension) {
-      result [dimension] = vector_1 (dimension) - vector_2 (dimension);
-    }
-    return result;
-  }
+  friend auto operator- (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2);
   
   bool operator==(finite_dimensional_vector const& other)const {
     for (int i = 0; i < num_dimensions; ++i) { if (data[i] != other.data[i]) { return false; }} return true; }
@@ -901,6 +877,40 @@ public:
 private:
   std::array<CoordinateType, num_dimensions> data;
 };
+  
+template <int vector_num_dimensions, typename vector_coordinate_type, typename factor_type>
+auto operator*(finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector, factor_type const & factor) {
+finite_dimensional_vector <vector_num_dimensions, decltype (std:: declval <vector_coordinate_type> ()*factor)> result;
+for (int dimension = 0; dimension <vector_num_dimensions; ++ dimension) {
+    result [dimension] = vector (dimension)*factor;
+}
+return result;
+}
+template <int vector_num_dimensions, typename vector_coordinate_type, typename factor_type>
+auto operator*(factor_type const & factor, finite_dimensional_vector <vector_num_dimensions, vector_coordinate_type> const & vector) {
+finite_dimensional_vector <vector_num_dimensions, decltype (factor*std:: declval <vector_coordinate_type> ())> result;
+for (int dimension = 0; dimension <vector_num_dimensions; ++ dimension) {
+    result [dimension] = factor*vector (dimension);
+}
+return result;
+}
+
+template <int shared_num_dimensions, typename coordinate_type_1, typename coordinate_type_2>
+auto operator+ (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2) {
+finite_dimensional_vector <shared_num_dimensions, decltype (std::declval <coordinate_type_1> () + std:: declval <coordinate_type_2> ())> result;
+for (int dimension = 0; dimension <shared_num_dimensions; ++ dimension) {
+    result [dimension] = vector_1 (dimension) + vector_2 (dimension);
+}
+return result;
+}
+template <int shared_num_dimensions, typename coordinate_type_1, typename coordinate_type_2>
+auto operator- (finite_dimensional_vector <shared_num_dimensions, coordinate_type_1> const & vector_1, finite_dimensional_vector <shared_num_dimensions, coordinate_type_2> const & vector_2) {
+finite_dimensional_vector <shared_num_dimensions, decltype (std::declval <coordinate_type_1> () - std:: declval <coordinate_type_2> ())> result;
+for (int dimension = 0; dimension <shared_num_dimensions; ++ dimension) {
+    result [dimension] = vector_1 (dimension) - vector_2 (dimension);
+}
+return result;
+}
 
 void test_iterate(polynomial<int64_t,int64_t,5> p) {
   std::cerr << "iterating " << p << "\n";
