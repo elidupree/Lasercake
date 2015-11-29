@@ -115,12 +115,18 @@ time_type when_nonneg(time_type start, Poly p) {
 
 
 class cave_generator {
-private:
+public:
+
   struct tile_info {
-    int64_t last_query;
     entity_ID ID;
     bool wall;
-    tile_info (): last_query (-1) {}
+  };
+
+private:
+  struct tile_info_inner {
+    int64_t last_query;
+    tile_info info;
+    tile_info_inner (): last_query (-1) {}
   };
   struct cave_block {
     int64_t last_query;
@@ -131,15 +137,15 @@ public:
   cave_generator (int64_t cache_size =100000, int64_t max_radius_in_tiles = 10, int64_t block_size = max_radius_in_tiles*2 + 12):
     cache_size (cache_size),
     max_radius_in_tiles (max_radius_in_tiles),
-    block_size (block_size), queries (0), last_prune (0) {}
+    block_size (block_size), queries (0){}
   
-  bool get (fd_vector tile) const {
+  tile_info const & get (fd_vector tile) const {
     ++ queries;
 
-    tile_info & result = tiles [tile];
+    tile_info_inner & result = tiles [tile];
     if (result.last_query == -1) {
-      result.wall = true;
-      result.ID  = siphash_id::combining('t','i','l','e',tile(0),tile(1));
+      result.info.wall = true;
+      result.info.ID  = siphash_id::combining('t','i','l','e',tile(0),tile(1));
       auto strategy =rounding_strategy<round_down, negative_continuous_with_positive>(); 
       for (tile_coordinate x = divide(tile(0) - max_radius_in_tiles, block_size, strategy); x*block_size <= tile(0) + max_radius_in_tiles; x++) {
         for (tile_coordinate y = divide (tile(1) - max_radius_in_tiles, strategy); y*block_size <= tile(1) + max_radius_in_tiles; y++) {
@@ -165,7 +171,7 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
                   (c.center_tile(0) - tile(0))*(c.center_tile(0) - tile(0)) +
                   (c.center_tile(1) - tile(1))*(c.center_tile(1) - tile(1))
                 )*tile_size*tile_size <= c.radius*c.radius) {
-              result.wall = false;
+              result.info.wall = false;
               goto triplebreak;
             }
           }
@@ -190,6 +196,7 @@ siphash_random_generator rng(siphash_id:: combining (x, y));
       }
 
     }
+    return result.info;
   }
 
 private:
@@ -197,14 +204,21 @@ private:
   const int64_t max_radius_in_tiles;
   const int64_t block_size;  
   mutable int64_t queries;
-  mutable int64_t last_prune;
   mutable std:: unordered_map <FD_vector, tile_info> tiles;
   mutable std:: unordered_map <FD_vector, cave_block> caves;
 };
 
+cave_generator generator;
+
+tile_info get_tile (time_steward:: accessor*accessor, FD_vector tile) {
+  tile_info result = generator.get (tile);
+  if (result.wall && accessor -> get <wall_destroyed> (result .ID)) {
+    result.wall = false;
+  }
+  return result;
+}
 
 void anticipate_shot_moving(time_steward::accessor* accessor, entity_ref e, fd_vector tile);
-entity_ref tile_entity(time_steward::accessor* accessor, fd_vector tile, bool req_wall_state = true);
 class shot_enters_new_tile : public event {
 public:
   shot_enters_new_tile(entity_id id, fd_vector tile) : id(id),tile(tile) {}
@@ -213,13 +227,14 @@ public:
 
   void operator()(time_steward::accessor* accessor)const override {
     auto e = accessor->get(id);
-    auto old_te = tile_entity(accessor, accessor->get<shot_tile>(e));
-    auto new_te = tile_entity(accessor, tile);
+    auto new_tile = get_tile (accessor, tile);
+    auto old_te = accessor -> get (generator.get (accessor->get<shot_tile>(e)).ID);
+    auto new_te = accessor -> get (new_tile .ID);
     auto& s = accessor->get_mut<tile_shots>(old_te);
     s = s.erase(id);
-    if (accessor->get<wall_state>(new_te) == WALL) {
+    if (new_tile.wall) {
       accessor->set<shot_trajectory>(e, none);
-      accessor->set<wall_state>(new_te, EMPTY);
+      accessor->set<wall_destroyed>(new_te, true);
     }
     else {
       anticipate_shot_moving(accessor, e, tile);
@@ -229,80 +244,6 @@ public:
     }
   }
 };
-
-std::unordered_map<fd_vector, entity_id> tile_entity_id_memo;
-entity_id tile_entity_id(fd_vector tile) {
-  auto i = tile_entity_id_memo.find(tile);
-  if (i != tile_entity_id_memo.end()) { return i->second; }
-  entity_id result = siphash_id::combining('t','i','l','e',tile(0),tile(1));
-  tile_entity_id_memo.insert(std::make_pair(tile, result));
-  return result;
-}
-
-const int64_t max_cave_radius_in_tiles = 10;
-static_assert (max_cave_radius_in_tiles*2 <= cave_block_size, "the current hacky system can't handle it");
-
-void require_wall_state(time_steward::accessor* accessor, entity_ref e, fd_vector tile);
-void require_cave_state(time_steward::accessor* accessor, entity_ref e, fd_vector tile);
-entity_ref tile_entity(time_steward::accessor* accessor, fd_vector tile, bool req_wall_state) {
-  auto e = accessor->get(tile_entity_id(tile));
-  if (req_wall_state) { require_wall_state(accessor, e, tile); }
-  return e;
-}
-cave_block const& cave_block_managing(time_steward::accessor* accessor, fd_vector tile) {
-  fd_vector cave_block_tile(
-    divide(tile(0), cave_block_size, rounding_strategy<round_down, negative_continuous_with_positive>()) * cave_block_size,
-    divide(tile(1), cave_block_size, rounding_strategy<round_down, negative_continuous_with_positive>()) * cave_block_size
-  );
-  entity_id cave_block_id = tile_entity_id(cave_block_tile);
-  siphash_random_generator rng(cave_block_id);
-  //std::cerr << tile << cave_block_tile << cave_block_id << "\n";
-  auto e = accessor->get(cave_block_id);
-  auto& b = accessor->get_mut<cave_block>(e);
-  if (!b) {
-    b = cave_block();
-    for (tile_coordinate x = cave_block_tile(0); x < cave_block_tile(0) + cave_block_size; ++x) {
-      for (tile_coordinate y = cave_block_tile(1); y < cave_block_tile(1) + cave_block_size; ++y) {
-        bool any_cave_here = (rng.random_bits(8) == 0) || ((x == 0) && (y == 0));
-        if (any_cave_here) {
-          space_coordinate cave_radius = tile_size*2 + rng.random_bits(tile_size_shift + 3);
-          assert (cave_radius < max_cave_radius_in_tiles*tile_size);
-          //std::cerr << x << ", " << y << ", " << cave_radius << "\n";
-          b->caves.emplace_back(fd_vector(x,y), cave_radius);
-        }
-      }
-    }
-  }
-  return *b;
-}
-void require_wall_state(time_steward::accessor* accessor, entity_ref e, fd_vector tile) {
-  auto w = accessor->get<wall_state>(e);
-  if (w == UNDETERMINED) {
-    for (tile_coordinate x = tile(0) - max_cave_radius_in_tiles; x <= tile(0) + max_cave_radius_in_tiles; x += 2*max_cave_radius_in_tiles) {
-      for (tile_coordinate y = tile(1) - max_cave_radius_in_tiles; y <= tile(1) + max_cave_radius_in_tiles; y += 2*max_cave_radius_in_tiles) {
-        cave_block const& b = cave_block_managing(accessor, fd_vector(x,y));
-        for (cave const& c : b.caves) {
-          if ((
-                (c.center_tile(0) - tile(0))*(c.center_tile(0) - tile(0)) +
-                (c.center_tile(1) - tile(1))*(c.center_tile(1) - tile(1))
-              )*tile_size*tile_size <= c.radius*c.radius) {
-            accessor->set<wall_state>(e, EMPTY);
-            return;
-          }
-        }
-      }
-    }
-    accessor->set<wall_state>(e, WALL);
-  }
-}
-void require_view_area(time_steward::accessor* accessor, fd_vector tile) {
-  for (tile_coordinate tx = tile(0)-view_rad; tx <= tile(0)+view_rad; ++tx) {
-    for (tile_coordinate ty = tile(1)-view_rad; ty <= tile(1)+view_rad; ++ty) {
-    //std::cerr << "r";
-      require_wall_state(accessor, accessor->get(tile_entity_id(fd_vector(tx,ty))), fd_vector(tx,ty));
-    }
-  }
-}
 
 void anticipate_shot_moving(time_steward::accessor* accessor, entity_ref e, fd_vector tile) {
   auto trajectory = *accessor->get<shot_trajectory>(e);
@@ -349,7 +290,7 @@ public:
           poly(accessor->now(), poly::without_origin_t(p.center(0)(accessor->now()),v(0))),
           poly(accessor->now(), poly::without_origin_t(p.center(1)(accessor->now()),v(1)))));
     fd_vector tile = accessor->get<player_center_reference_tile>(player);
-    auto te = tile_entity(accessor, tile);
+    auto te = accessor -> get (generator.get (tile) .ID);
     auto& s = accessor->get_mut<tile_shots>(te);
     s = s.insert(shot.id());
     accessor->set<shot_tile>(shot, tile);
@@ -438,8 +379,7 @@ public:
     for (tile_coordinate tx = ct(0)-1-(v(0)<0); tx <= ct(0)+1+(v(0)>0); ++tx) {
       for (tile_coordinate ty = ct(1)-1-(v(1)<0); ty <= ct(1)+1+(v(1)>0); ++ty) {
         auto tile = fd_vector(tx,ty);
-        auto te = tile_entity(accessor, tile);
-        if (accessor->get<wall_state>(te) == WALL) {
+        if (get_tile (accessor, tile).wall) {
           for (space_coordinate corner_x = tile_to_space_min(tx); corner_x <= tile_to_space_max(tx); corner_x += tile_size) {
             for (space_coordinate corner_y = tile_to_space_min(ty); corner_y <= tile_to_space_max(ty); corner_y += tile_size) {
               if (c(0) < corner_x-p.radius && v(0) <= 0) { continue; }
@@ -490,7 +430,6 @@ public:
   void operator()(time_steward::accessor* accessor)const override {
     //std::cerr << "player_enters_new_tile\n";
     accessor->set<player_center_reference_tile>(accessor->get(id), tile);
-    require_view_area(accessor, tile);
   }
 };
 
@@ -528,7 +467,6 @@ public:
   void operator()(time_steward::accessor* accessor)const override {
     entity_ref player = accessor->get(time_steward_system::global_object_id);
     accessor->set<player_center_reference_tile>(player, fd_vector(0,0));
-    require_view_area(accessor, fd_vector(0,0));
     accessor->set<player_shape>(player, player_shape(
         poly_fd_vector(
           poly(0, poly::without_origin_t(0,0)),
@@ -630,14 +568,14 @@ draw_green_caves_metadata draw_green_caves(fd_vector screen_size, gc_history_tre
   for (tile_coordinate tx = ct(0)-view_rad; tx <= ct(0)+view_rad; ++tx) {
     for (tile_coordinate ty = ct(1)-view_rad; ty <= ct(1)+view_rad; ++ty) {
       auto tile = fd_vector(tx,ty);
-      auto te = accessor->get(tile_entity_id(tile));
+      auto info = get_tile (accessor.get (), tile);
       
-      if (accessor->get<wall_state>(te) == WALL) {
+      if (info.wall) {
         double_vector v0 = metadata.main_to_screen(tile_to_space_min(tx) - cx, tile_to_space_min(ty) - cy);
         double_vector v1 = metadata.main_to_screen(tile_to_space_max(tx) - cx, tile_to_space_max(ty) - cy);
         draw.rect(v0(0), v0(1), v1(0), v1(1), true);
       }
-      for (entity_id shot : accessor->get<tile_shots>(te)) {
+      for (entity_id shot : accessor->get<tile_shots>(accessor -> get (info .ID))) {
         maybe_assert(accessor->get<shot_tile>(accessor->get(shot)) == tile);
         auto trajectory = *accessor->get<shot_trajectory>(accessor->get(shot));
         double_vector v0 = metadata.main_to_screen(trajectory(0)(accessor->now()) - cx, trajectory(1)(accessor->now()) - cy);
