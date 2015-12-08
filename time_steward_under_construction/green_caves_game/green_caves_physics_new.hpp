@@ -92,12 +92,32 @@ void shot_motion_predictor (Accessor accessor, entity_ID ID) {
   });
 }
 
+template <typename Accessor>
+void player_motion_predictor (Accessor accessor, entity_ID ID) {
+  
+  if (best_time != never) {
+    accessor.predict (best_time, [ID, new_tile] (Accessor accessor) {
+      accessor.set <player_reference_tile> (ID, new_tile);
+    });
+  }
+}
+
+template <typename Accessor>
+void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
+  
+}
 
 namespace implementation {
 using time_steward_system:: field;
 typedef time_steward_system:: physics_list <
   field <wall_destroyed, bool, false>,
-  
+  field <shot_trajectory,
+  field <shot_tile, tile_vector,
+  field <player_shape,
+  field <player_reference_tile, tile_vector,
+  predictor <shot_trajectory, shot_motion_predictor>,
+  predictor <player_shape, player_motion_predictor>,
+  predictor <player_shape, player_hits_old_predictor>
 > green_caves_physics;
 }
 typedef implementation:: green_caves_physics green_caves_physics;
