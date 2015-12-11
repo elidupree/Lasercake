@@ -133,7 +133,75 @@ void tile_change_predictor (Accessor accessor, entity_ID ID) {
 
 template <typename Accessor>
 void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
-  
+  const auto center = accessor.get <trajectory> (ID);
+  const auto player_tile = accessor.get <reference_tile> (ID);
+  const auto radius = accessor.get <player_radius> (ID);
+  tile_vector minima;
+  tile_vector maxima;
+  for (num_coordinates_type dimension = 0; dimension <2;++dimension) {
+    minima [dimension] = space_to_tile_min (tile_to_space_min (player_tile (dimension)) - radius);
+    maxima [dimension] = space_to_tile_max (tile_to_space_max (player_tile (dimension)) + radius);
+  }
+  tile_vector tile;
+  tile_vector best_tile;
+  time_type best_time = never;
+  for (tile [0] = minima (0); tile [0] <= maxima (0);++tile [0]) {
+    for (tile [1] = minima (1); tile [1] <= maxima (1);++tile [1]) {
+      if (!get_tile (accessor, tile).wall) continue;
+      time_type when = never;
+      when = time_min (when, when_trajectory_intersects_circle (
+        center, tile_to_space_min (tile (0)), tile_to_space_min (tile (1))));
+      when = time_min (when, when_trajectory_intersects_circle (
+        center, tile_to_space_min (tile (0)), tile_to_space_max (tile (1))));
+      when = time_min (when, when_trajectory_intersects_circle (
+        center, tile_to_space_max (tile (0)), tile_to_space_min (tile (1))));
+      when = time_min (when, when_trajectory_intersects_circle (
+        center, tile_to_space_max (tile (0)), tile_to_space_max (tile (1))));
+      when = time_min (when, when_trajectory_intersects_rectangle (center,
+        tile_to_space_min (tile (0)) - radius, tile_to_space_min (tile (1)),
+        tile_to_space_max (tile (0)) + radius, tile_to_space_max (tile (1))));
+      when = time_min (when, when_trajectory_intersects_rectangle (center,
+        tile_to_space_min (tile (0)), tile_to_space_min (tile (1)) - radius,
+        tile_to_space_max (tile (0)), tile_to_space_max (tile (1)) + radius));
+      if (when != never) {
+        if (best_time == never || when <best_time) {
+          //note: the when == best_time case creates a bias towards
+          //colliding with top-left walls first. However, I believe
+          //that that doesn't make any difference.
+          best_time = when;
+          best_tile = tile;
+        }
+      }
+    }
+  }
+  if (best_time != never) {
+    accessor.predict (best_time - 1, [ID, best_tile] (Accessor accessor) {
+      auto const & tile = best_tile;
+      auto & center = accessor.get_mutable <trajectory> (ID);
+      const auto radius = accessor.get <player_radius] (ID);
+      center.start_location += center.velocity*(accessor.now () - center.start_time);
+      center.start_time = accessor.now ();
+      bool out_of_bounds_0 =
+        (center.start_location (0) + radius <tile_to_space_min (tile (0))) ||
+        (center.start_location (0) - radius >tile_to_space_max (tile (0)));
+      bool out_of_bounds_1 =
+        (center.start_location (1) + radius <tile_to_space_min (tile (1))) ||
+        (center.start_location (1) - radius >tile_to_space_max (tile (1)));
+      if (out_of_bounds_0 && ! out_of_bounds_1) {
+        center.velocity [0] = 0;
+      }
+      else if (out_of_bounds_1 && ! out_of_bounds_0) {
+        center.velocity [1] = 0;
+      }
+      else {
+        space_coordinate mid_x = (tile_to_space_min(tile(0)) + tile_to_space_max(tile(0))) / 2;
+        space_coordinate mid_y = (tile_to_space_min(tile(1)) + tile_to_space_max(tile(1))) / 2;
+        space_vector corner ((center.start_location (0) < mid_x) ? tile_to_space_min(tile(0)) : tile_to_space_max(tile(0)), (center.start_location (1) < mid_y) ? tile_to_space_min(tile(1)) : tile_to_space_max(tile(1)));
+        space_vector delta = center.start_location - corner;
+        
+      }
+    });
+  }
 }
 
 namespace implementation {
