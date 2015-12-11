@@ -78,15 +78,7 @@ bool shot_hits (Accessor accessor, entity_ID ID, tile_vector tile) {
 template <typename Accessor>
 void tile_change_predictor (Accessor accessor, entity_ID ID) {
   const auto trajectory = accessor.get <trajectory> (ID);
-  if (! accessor.is_set <reference_tile> (ID)) {
-    accessor.predict (accessor.immediately (), [ID] (Accessor accessor) {
-      const auto trajectory = accessor.get <trajectory> (ID);
-      accessor.set <reference_tile> (ID, tile_vector (tile_to_space_min (trajectory.start_location + trajectory.velocity*(accessor.now () - trajectory.start_time))));
-    });
-    return;
-  }
-  
-  const auto tile = accessor.get <reference_tile> (ID);
+  const auto tile = accessor.is_set <reference_tile> (ID)? accessor.get <reference_tile> (ID): tile_to_space_min (trajectory.start_location);
   space_coordinate threshold_X = (trajectory.velocity (0) >0? tile_to_space_max (tile (0)): tile_to_space_min (tile (0))) - trajectory.start_location (0);
   space_coordinate threshold_Y = trajectory.velocity (1) >0? tile_to_space_max (tile (1)): tile_to_space_min (tile (1))) - trajectory.start_location (1);
   space_coordinate compare;
@@ -130,6 +122,51 @@ void tile_change_predictor (Accessor accessor, entity_ID ID) {
   });
 }
 
+time_type time_min (time_type time_0, time_type time_1) {
+  if (time_0 == never) return time_1;
+  if (time_1 == never) return time_0;
+  return std:: min (time_0, time_1);
+}
+
+time_type when_trajectory_intersects_circle (trajectory tango, space_coordinate X, space_coordinate Y, space_coordinate radius) {
+  space_vector relative_start = tango.start_location;
+  relative_start [0] -= X;
+  relative_start [1] -= Y;
+  //X = time*velocity (0) + start (0)
+  //distance squared = X*X + Y*Y
+  space_coordinate alpha = tango.velocity.dot (tango.velocity);
+  space_coordinate bravo = 2*(tango.velocity.dot(relative_start));
+  space_coordinate Charlie = relative_start.dot (relative_start);
+  space_coordinate discriminant = bravo*bravo - 4*alpha*Charlie;
+  if (discriminant >= 0) {
+    assert (alpha >0);
+    return divide (-bravo -isqrt( discriminant), alpha*2, rounding_strategy <round_up, negative_continuous_with_positive> ());
+  }
+  return never;
+}
+
+time_type when_trajectory_intersects_rectangle (trajectory tango, space_coordinate min_X, space_coordinate min_Y, space_coordinate Max_X, space_coordinate Max_Y) {
+  space_vector minima (min_X, min_Y);
+  space_vector maxima (Max_X, Max_Y);
+  minima -= tango.start_location;
+  maxima -= tango.start_location;
+  time_type when = never;
+  for (num_coordinates_type dimension = 0; dimension <2;++dimension) {
+    time_type candidate = never;
+    if (tango.velocity (dimension) <0) {
+      candidate = divide (maxima (dimension), tango.velocity (dimension), rounding_strategy <round up, negative_continuous_with_positive> ());
+    }
+    if (tango.velocity (dimension) >0) {
+      candidate = divide (minima (dimension), tango.velocity (dimension), rounding_strategy <round up, negative_continuous_with_positive> ());
+    }
+    space_coordinate other_dimension_movement =tango.velocity (! dimension)*candidate;
+
+    if (candidate != never && other_dimension_movement >= minima (! dimension) && other_dimension_movement <= maxima (! dimension)) {
+      when = time_min (when, candidate);
+    }
+  }
+  return when;
+}
 
 template <typename Accessor>
 void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
@@ -150,13 +187,13 @@ void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
       if (!get_tile (accessor, tile).wall) continue;
       time_type when = never;
       when = time_min (when, when_trajectory_intersects_circle (
-        center, tile_to_space_min (tile (0)), tile_to_space_min (tile (1))));
+        center, tile_to_space_min (tile (0)), tile_to_space_min (tile (1)), radius));
       when = time_min (when, when_trajectory_intersects_circle (
-        center, tile_to_space_min (tile (0)), tile_to_space_max (tile (1))));
+        center, tile_to_space_min (tile (0)), tile_to_space_max (tile (1)), radius));
       when = time_min (when, when_trajectory_intersects_circle (
-        center, tile_to_space_max (tile (0)), tile_to_space_min (tile (1))));
+        center, tile_to_space_max (tile (0)), tile_to_space_min (tile (1)), radius));
       when = time_min (when, when_trajectory_intersects_circle (
-        center, tile_to_space_max (tile (0)), tile_to_space_max (tile (1))));
+        center, tile_to_space_max (tile (0)), tile_to_space_max (tile (1)), radius));
       when = time_min (when, when_trajectory_intersects_rectangle (center,
         tile_to_space_min (tile (0)) - radius, tile_to_space_min (tile (1)),
         tile_to_space_max (tile (0)) + radius, tile_to_space_max (tile (1))));
@@ -198,7 +235,16 @@ void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
         space_coordinate mid_y = (tile_to_space_min(tile(1)) + tile_to_space_max(tile(1))) / 2;
         space_vector corner ((center.start_location (0) < mid_x) ? tile_to_space_min(tile(0)) : tile_to_space_max(tile(0)), (center.start_location (1) < mid_y) ? tile_to_space_min(tile(1)) : tile_to_space_max(tile(1)));
         space_vector delta = center.start_location - corner;
-        
+        auto dmagsq = delta.dot (delta);
+        auto removed = delta *center.velocity.dot(delta);
+        //dealing with the rounding error here is a little tricky,
+        //because rounding in the wrong direction would mean the player
+        //is still moving towards the wall, potentially resulting in an
+        //infinite loop. So we specifically round away from the wall.
+        //removed = divide(removed, dmagsq, rounding_strategy<round_up, negative_mirrors_positive>());
+        removed[0] = divide(removed[0], dmagsq, rounding_strategy<round_up, negative_mirrors_positive>());
+        removed[1] = divide(removed[1], dmagsq, rounding_strategy<round_up, negative_mirrors_positive>());
+        center.velocity -= removed;
       }
     });
   }
