@@ -250,6 +250,16 @@ void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
   }
 }
 
+template <typename Accessor>
+void shoot (entity_ID shooter, space_vector velocity) {
+  entity_ID shot = accessor.random_id ();
+  auto shooter_trajectory = accessor.get <trajectory> (shooter);
+  space_vector shooter_location = shooter_trajectory.start_location + (shooter_trajectory.velocity*accessor.now () - shooter_trajectory.start_time);
+  accessor.set <trajectory> (shot, {accessor.now (), shooter_location, velocity});
+  tile_vector tile = space_to_tile_min (shooter_location);
+  accessor.set_group_membership <tile_shots> (tile_ID (tile), shot);
+}
+
 namespace implementation {
 using time_steward_system:: field;
 
