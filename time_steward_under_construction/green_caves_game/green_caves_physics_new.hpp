@@ -43,6 +43,10 @@ struct trajectory {
   time_type start_time;
   space_vector start_location;
   space_vector velocity;
+  void update_to (time_type time) {
+    start_location += velocity*(time - start_time);
+    start_time = time;
+  }
 };
 
 template <typename Accessor>
@@ -216,8 +220,7 @@ void player_hits_walls_predictor (Accessor accessor, entity_ID ID) {
       auto const & tile = best_tile;
       auto & center = accessor.get_mutable <trajectory> (ID);
       const auto radius = accessor.get <player_radius] (ID);
-      center.start_location += center.velocity*(accessor.now () - center.start_time);
-      center.start_time = accessor.now ();
+      center.update_to (accessor.now ());
       bool out_of_bounds_0 =
         (center.start_location (0) + radius <tile_to_space_min (tile (0))) ||
         (center.start_location (0) - radius >tile_to_space_max (tile (0)));
@@ -258,6 +261,13 @@ void shoot (entity_ID shooter, space_vector velocity) {
   accessor.set <trajectory> (shot, {accessor.now (), shooter_location, velocity});
   tile_vector tile = space_to_tile_min (shooter_location);
   accessor.set_group_membership <tile_shots> (tile_ID (tile), shot);
+}
+
+template <typename Accessor>
+void accelerate (entity_ID ID, space_vector delta_velocity) {
+  auto & center = accessor.get_mutable <trajectory> (ID);
+  center.update_to (accessor.now ());
+  center.velocity += delta_velocity;
 }
 
 namespace implementation {
