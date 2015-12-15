@@ -102,13 +102,18 @@ template <typename physics, auditing_level_type auditing_level>
 class time_steward {
   
   typedef std:: function <void (event_accessor &)> event_function;
-  typedef uint64_t serial_number_type;
   
-  template <typename field_data>
+  
+  
+  template <typename field_identifier>
   struct field_history {
+    typedef physics:: data_for <field_identifier> field_data;
     typedef std:: pair <intrusive_pointer <event_type>, field_data> change;
+    
     std:: vector <change> changes;
     std:: vector <intrusive_pointer <event_type>> existence_changes;
+    physics:: data_for_each_predictor_watching <field_identifier, prediction_history> prediction_histories;
+    
     bool exists_before (extended_time time) {
       if (existence_changes.empty () || existence_changes [0] <time) {return false;}
       //optimize for checking at the end
@@ -142,16 +147,6 @@ class time_steward {
     extended_time valid_until;
     access_pointer latest_access;
     
-    //do we need to reference-count predictions?
-    //One possible model is that the "what accessed this" collections
-    //contain one pointer for each entry, and in the case of predictions,
-    //that pointer is a smart pointer that reference counts them.
-    //Another model is that the data is not a pointer but a serial number,
-    //which must be looked up in a hash table; in that case, we could just
-    //delete the prediction from the hash table, and not have a reference count.
-    //However, we would need a special datatype that could automatically ignore
-    //values that have been deleted (because they have no ordering)
-    
     time_type result_time;
     event_function result_function;
     intrusive_pointer <event_type> last_event;
@@ -161,7 +156,6 @@ class time_steward {
     entity_ID entity;
     intrusive_pointer <prediction_type> last;
   }
-  typedef std::vector <prediction_type> prediction_history;
   struct event_type: public boost::intrusive_ref_counter <event_type> {
     intrusive_pointer <event_type> previous_from_same_prediction;
     extended_time time;
@@ -186,14 +180,46 @@ class time_steward {
     std::priority_queue <access_pointer, std::vector <access_pointer>, sort> bounded_accesses;
     std::vector <access_pointer> current_prediction_accesses;
   };
+  enum issue_type {
+    MISSING_NEXT_PREDICTION,
+    MISSING_PREDICTED_EVENT,
+    EVENT_NOT_CORRECTLY_EXECUTED
+  };
+  struct issue {
+    issue_type type;
+    extended_time time;
+    intrusive_pointer <event_type> event;
+    prediction_history*prediction;
+  };
+  struct issue_collector {
+    struct sort {bool operator< (issue const & alpha, issue const & beta) const {
+      //reverse ordering, to do the earliest issues first
+      if (alpha.time != beta.time) return alpha.time >beta.time;
+      //for some reason, maybe we prefer doing some issues first
+      return alpha.type >beta.type;
+    }};
+    std::priority_queue <issue, std::vector <issue>, sort> data;
+    void insert (issue added) {data.push (added);}
+  }
   
-  serial_number_type next_serial_number = 0;
+  
+  
   physics:: data_for_each_field <field_history_map> field_histories;
-  std::unordered_map <prediction_history_ID, prediction_history> prediction_histories;
+  //should access histories be part of the field histories,
+  //like the prediction histories are?
+  //I'm keeping them separate, because I plan to make it so that
+  //access histories are not always kept for every field, and instead,
+  //can sometimes apply to a whole group of fields, to minimize the number
+  //of accesses we have to store.
   std::unordered_map <field_ID, access_history> access_histories;
-  std::unordered_map <serial_number_type, prediction_type> predictions;
-  std::unordered_map <serial_number_type, event_type> events;
+  //the only function of the fiat events container is to allow the client
+  //to delete fiat events by time/distinguisher.
+  //Some optimization could be done here.
+  //It's low priority because there are usually fewer fiat events than other things.
+  std::unordered_map <siphash_id, intrusive_pointer <event_type>> fiat_events;
   issue_collector upcoming_issues;
+  
+  
   
   template <typename field_identifier, typename History>
   void erase_field_changes_since (History & history, extended_time time) {
@@ -213,17 +239,27 @@ class time_steward {
     auto & history = field_histories.get <field_identifier> ();
     bool exists_before = history.exists_before (accessor.now ());
     bool exists_after =accessor.exists <field_identifier> (ID);
+    
+    //note: if we are ever allowed to delete things in the middle of a
+    //field history, without deleting everything after it, then it becomes
+    //necessary to store ALL cases in which an event set the field state,
+    //even if it wasn't a change at the processing-time* when the event
+    //was first executed.
+    //However, since we only delete an entire history tail at a time,
+    //any redundant changes we stored would be deleted anyway,
+    //so we don't have to store them.
     if (!exists_before &&!exists_after) {return false;}
-    //here would be the place to optimize by returning if the
+    //here would be the place to optimize by returning false if the
     //DATA before and after were equal, if they are equality comparable
+    
     erase_field_changes_since <field_identifier> (history, accessor.now ());
     if (exists_after) {
       history.changes.emplace_back (std:: move (accessor.entities.get <field_identifier> ()));
       if (!exists_before) {
         history.existence_changes.push_back (accessor.now ());
-        physics:: for_predictors_watching <field_identifier> ([& ID, & accessor] (predictor_index predictor) {
-          upcoming_issues.insert (MISSING_PREDICTION, predictor, accessor.now ());
-        });
+        for (auto const & prediction_history: history.prediction_histories) {
+          upcoming_issues.insert {MISSING_NEXT_PREDICTION, accessor.now (), nullptr, & prediction_history};
+        };
       }
     }
     else {
@@ -253,7 +289,10 @@ class time_steward {
       invalidate_access (time, history, access);
     }
     history.current_prediction_accesses.clear ();
-    while (history.bounded_accesses.top ()->time >time) {
+    while (history.bounded_accesses.top ()->time >time ||
+        //when we undo an event, we also want to remove all references
+        //to that event, including old predictions that were valid until that event.
+        (undoing_event && history.bounded_accesses.top ()->time == time)) {
       invalidate_access (time, history, history.bounded_accesses.top (), undoing_event);
       history.bounded_accesses.pop ();
     }
@@ -262,16 +301,34 @@ class time_steward {
     if (access->prediction) {
       auto & history =*access->prediction->history;
       bool needs_replacement = access->prediction.made_at <time;
-      if (time <access->prediction->valid_until) {
-        for (; history.last != access->prediction; history.last = history.last->previous) {
+      if (time <access->prediction->valid_until ||
+          //when we undo an event, we also want to remove all references
+          //to that event, including old predictions that were valid until that event.
+          (undoing_event && time == access->prediction->valid_until)) {
+        while you will will will you will yeah (history.last != access->prediction) {
           assert (history.last->made_at >= time);
           invalidate_prediction (*history.last);
         }
-        invalidate_prediction_after (*access->prediction, time);
+        if (undoing_event) {
+          //adding a change can partially invalidate a prediction,
+          //but removing one can't.
+          assert (time == access->prediction->valid_until);
+          //for the "remove all references" thing, we have to destroy the
+          //whole prediction. If the prediction stored a list of things
+          //that it accessed, we could, instead, re-extend the prediction
+          //into the future. But it doesn't (to save memory).
+          invalidate_prediction (*access->prediction, time);
+        }
+        else {
+          invalidate_prediction_after (*access->prediction, time);
+        }
+        if (history.last&& field_exists_after (physics:: field_for_predictor (history->predictor), history->entity, history.last->valid_until)) {
+          upcoming_issues.insert {MISSING_NEXT_PREDICTION, history.last->valid_until, nullptr, & history};
+        }
       }
       if (needs_replacement) {
         history.bounded_accesses.push (prediction.latest_access);
-        //the above may invalidate access.
+        //the above may invalidate the variable "access".
         //Therefore, we can't use access after this. Just be safe,
         return;
       }
@@ -281,6 +338,8 @@ class time_steward {
     }
   }
   void invalidate_prediction (prediction_type & prediction) {
+    assert (prediction.history->last == & prediction);
+    prediction.history->last = prediction.previous;
     prediction.history = nullptr;
     prediction.previous = nullptr;
     prediction.result_function = nullptr;
@@ -305,18 +364,18 @@ class time_steward {
     }
   }
   void invalidate_event_completely (event_type & event) {
+    if (event.executed) {
+      invalidate_event_result (event);
+    }
     assert (event.valid);
     event.valid = false;
-    if (event.executed) {
-      upcoming_issues.insert (EVENT_INCORRECTLY_EXECUTED, & event);
-    }
   }
   void invalidate_event_results (event_type & event) {
     assert (event.executed);
     assert (event.access);
     event.access->event = nullptr;
     event.access = nullptr;
-    upcoming_issues.insert (EVENT_INCORRECTLY_EXECUTED, & event);
+    upcoming_issues.insert (EVENT_NOT_CORRECTLY_EXECUTED, & event);
   }
   void record_access (field_ID ID, access_pointer const & access) {
     auto & history = access_histories [ID];
@@ -328,6 +387,10 @@ class time_steward {
     }
   }
   
+  //TODO: when we invalidate event results,
+  //combine do_event and undo_event so that any fields that are changed
+  //the same way as they were changed last time don't need to have their
+  //accesses invalidated.
   void do_event (event_type & event) {
     event_accessor accessor (this, event.time);
     event.function () (accessor);
@@ -337,52 +400,151 @@ class time_steward {
       record_access (accessed, event.access);
     }
     event.modified = std:: move (accessor.modified);
-    std:: remove_if (event.modified.begin (), event->modified.end (),
+    std:: remove_if (event.modified.begin (), event.modified.end (),
       [] (field_ID const & ID) {
       if ((*transfer_field_change_functions [ID.field_index]) (accessor, ID.entity)) {
-        invalidate_accesses_since (event->time, ID);
+        invalidate_accesses_since (event.time, ID);
         return false;
       }
       return true;
     });
+    //we could spend CPU to save memory, by doing
+    //event.modified.shrink_to_fit ();
+    //the might be a way to end up with an exact-sized container
+    //without spending extra CPU, hmm
   }
-  void undo_event (event_reference event) {
-    for (auto ID: event->modified) {
-      (*undo_field_change_functions [ID.field_index]) (event->time, ID.entity);
-      invalidate_accesses_since (event->time, ID, true);
+  void undo_event (event & event) {
+    for (auto ID: event.modified) {
+      (*undo_field_change_functions [ID.field_index]) (event.time, ID.entity);
+      invalidate_accesses_since (event.time, ID, true);
     }
+    event.modified.clear ();
+    event.modified.shrink_to_fit ();
   }
-  void make_prediction (extended_time when, predictor_index predictor, entity_ID entity) {
-    prediction_type & prediction = predictions [next_serial_number++];
+  
+  void make_prediction (extended_time when, intrusive_pointer <prediction_type> const & previous) {
+    intrusive_pointer <prediction_type> prediction_pointer (new prediction_type);
+    prediction_type & prediction =*prediction_pointer;
     prediction.made_at = when;
+    prediction.previous = previous;
+    prediction.history = previous->history;
+    
     predictor_accessor accessor (this, prediction);
-    physics.run_predictor (predictor, accessor, entity);
+    physics.run_predictor (predictor, accessor, previous->history->entity);
     //that sets prediction.valid_until and prediction.prediction
-    prediction.latest_access.reset (new access_info {prediction.valid_until, prediction.serial_number});
+    
+    prediction.latest_access.reset (new access_info {prediction.valid_until, nullptr, prediction_pointer});
     for (auto accessed: accessor.accessed) {
       record_access (accessed, prediction->latest_access);
     }
-    if (prediction.valid_until <max_time) {
-      upcoming_issues.insert (MISSING_PREDICTION, predictor, prediction.valid_until);
+    if (prediction.valid_until <max_time && field_exists_after (physics:: field_for_predictor (prediction.history->predictor), prediction.history->entity, when)) {
+      upcoming_issues.insert {MISSING_NEXT_PREDICTION, prediction.valid_until, nullptr, prediction.history};
     }
-    if (prediction.prediction && next_event_time (prediction) <= prediction.valid_until) {
-      upcoming_issues.insert (MISSING_PREDICTED_EVENT, prediction);
+    prediction_may_predict_event (prediction);
+  }
+  void prediction_may_predict_event (prediction_type & prediction) {
+    extended_time event_time = next_event_time (prediction);
+    if (prediction.result_function && event_time >prediction.made_at && event_time <= prediction.valid_until) {
+      upcoming_issues.insert {MISSING_PREDICTED_EVENT, event_time, nullptr, & prediction};
     }
   }
+  void make_predicted_event (standard_time when, prediction_type & prediction) {
+    intrusive_pointer <event_type> event_pointer (new event_type ());
+    event_type & event =*event_pointer;
+    event.valid = true;
+    event.time = when;
+    event.function = prediction.result_function;
+    event.previous_from_same_prediction.swap (prediction.last_event);
+    prediction.last_event = event_pointer;
+    upcoming_issues.insert {EVENT_NOT_CORRECTLY_EXECUTED, when, event_pointer, nullptr};
+    prediction_may_predict_event (prediction);
+  }
+  
+  extended_time prediction_history_next_attention_time (prediction_history const & history) {
+    extended_time search_from;
+    if (history.last) {
+      if (history.last->result_function) {
+        extended_time event_time = next_event_time (*history.last);
+        if (event_time >prediction.made_at && event_time <= prediction.valid_until) {
+          return event_time;
+        }
+      }
+      search_from = history.last->valid_until;
+    }
+    else {
+      search_from = min_extended_time;
+    }
+    auto transition = next_existence_transition (field_for_predictor (history.predictor), history.entity, search_from);
+    if (transition.started_existing) return transition.time;
+    return search_from;
+  }
+  
+  siphash_id predicted_event_time_ID (prediction_history const & history, time_type base_time, uint64_t iteration) {
+    return siphash_id::combining (history.predictor, history.entity, base_time, iteration);
+  }
+  siphash_id fiat_event_time_ID (time_type time, uint64_t distinguisher) {
+    //TODO: make this part of time_traits
+    return siphash_id::combining (time, distinguisher);
+  }
+  extended_time next_event_time (prediction_type const & prediction) {
+    prediction_history const & history =*prediction.history;
+    uint64_t iteration;
+    if (prediction.last_event) {
+      iteration = prediction.last_event->time.iteration + 1;
+    }
+    else if (prediction.result_time == prediction.made_at.base_time) {
+      siphash_id candidate_ID = predicted_event_time_ID (history, prediction.result_time, prediction.iteration);
+      if (candidate_ID >prediction.made_at.ID) {
+        return {prediction.made_at.base_time, prediction.made_at.iteration, candidate_ID};
+      }
+      iteration = prediction.made_at.iteration + 1;
+    }
+    else {
+      iteration = 0;
+    }
+    return {prediction.result_time, iteration, predicted_event_time_ID (history, prediction.result_time, iteration)};
+  }
+  
   void handle_issue (issue_type issue) {
     switch (issue.type) {
-      case MISSING_PREDICTION: {
-        make_prediction (issue.time, issue.predictor, issue .id);
+      case MISSING_NEXT_PREDICTION: {
+        if (prediction_history_next_attention_time (*issue.predictor) == issue.time) {
+          make_prediction (issue.time,*issue.predictor);
+        }
       } break;
       case MISSING_PREDICTED_EVENT: {
-        
+        if (prediction_history_next_attention_time (*issue.predictor) == issue.time) {
+          make_predicted_event (issue.time,*issue.predictor);
+        }
+      } break;
+      case EVENT_NOT_CORRECTLY_EXECUTED: {
+        event_type & event =*issue.event;
+        if (event.executed &&!event.access) {
+          undo_event (event);
+        }
+        if (event.valid) {
+          do_event (event);
+        }
       } break;
     }
   }
   
 public:
-  void insert_fiat_event (time_type time, uint64_t distinguisher, event_function event) {
-  
+  void insert_fiat_event (time_type time, uint64_t distinguisher, event_function function) {
+    intrusive_pointer <event_type> event_pointer (new event_type ());
+    event_type & event =*event_pointer;
+    event.valid = true;
+    event.time = {time, 1ull << 63, fiat_event_time_ID (time, distinguisher)};
+    event.function = function;
+    fiat_events.insert (std::make_pair (event.time .ID, event_pointer));
+    upcoming_issues.insert {EVENT_NOT_CORRECTLY_EXECUTED, time, event_pointer, nullptr};
+  }
+  void erase_fiat_event (time_type time, uint64_t distinguisher) {
+    auto iterator = fiat_events.find (fiat_event_time_ID (time, distinguisher));
+    if (iterator != fiat_events.end ()) {
+      invalidate_event (*iterator->second);
+      fiat_events.erase (iterator);
+    }
   }
 };
 
