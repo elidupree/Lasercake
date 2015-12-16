@@ -158,9 +158,9 @@ class time_steward {
   struct event_type: public boost::intrusive_ref_counter <event_type> {
     extended_time time;
     event_function function;
-    //the following 2 members could be compressed in memory a bit,
-    //if that turns out to be valuable
-    bool executed;
+    bool executed_correctly;
+    access_pointer access;
+    bool executed () const {return bool (access);}
     std::vector <entity_ID> modified;
   };
   struct access_info: public boost::intrusive_ref_counter <access_info> {
@@ -182,12 +182,13 @@ class time_steward {
     MISSING_PREDICTED_EVENT,
     EVENT_NOT_CORRECTLY_EXECUTED
   };
-  struct issue {
+  struct issue_old {
     issue_type type;
     extended_time time;
     intrusive_pointer <event_type> event;
     prediction_history*prediction;
   };
+  typedef access_pointer issue;
   struct issue_collector {
     struct sort {bool operator< (issue const & alpha, issue const & beta) const {
       //reverse ordering, to do the earliest issues first
@@ -196,7 +197,8 @@ class time_steward {
       return alpha.type >beta.type;
     }};
     std::priority_queue <issue, std::vector <issue>, sort> data;
-    void insert (issue added) {data.push (added);}
+    void insert (issue const & added) {data.push (added);}
+    
   }
   
   
@@ -358,16 +360,16 @@ class time_steward {
   void invalidate_event_completely (event_type & event) {
     assert (event.function);
     event.function = nullptr;
-    if (event.executed) {
+    if (event.executed ()) {
       invalidate_event_result (event);
     }
   }
   void invalidate_event_results (event_type & event) {
-    assert (event.executed);
     assert (event.access);
-    event.access->event = nullptr;
-    event.access = nullptr;
-    upcoming_issues.insert (EVENT_NOT_CORRECTLY_EXECUTED, & event);
+    if (event.executed_correctly) {
+      event.executed_correctly = false;
+      upcoming_issues.insert (event.access);
+    }
   }
   void record_access (field_ID ID, access_pointer const & access) {
     auto & history = access_histories [ID];
@@ -386,7 +388,6 @@ class time_steward {
   void do_event (event_type & event) {
     event_accessor accessor (this, event.time);
     event.function () (accessor);
-    event.executed = true;
     event.access.reset (new access_info {event.time, & event, nullptr});
     for (auto accessed: accessor.accessed) {
       record_access (accessed, event.access);
@@ -404,14 +405,17 @@ class time_steward {
     //event.modified.shrink_to_fit ();
     //the might be a way to end up with an exact-sized container
     //without spending extra CPU, hmm
+    event.executed_correctly = true;
   }
   void undo_event (event & event) {
     for (auto ID: event.modified) {
-      (*undo_field_change_functions [ID.field_index]) (event.time, ID.entity);
-      invalidate_accesses_since (event.time, ID, true);
+      (*undo_field_change_functions [ID.field_index]) (event.access->time, ID.entity);
+      invalidate_accesses_since (event.access->time, ID, true);
     }
     event.modified.clear ();
     event.modified.shrink_to_fit ();
+    event.access->event = nullptr;
+    event.access = nullptr;
   }
   
   void make_prediction (extended_time when, intrusive_pointer <prediction_type> const & previous) {
@@ -420,6 +424,7 @@ class time_steward {
     prediction.made_at = when;
     prediction.previous = previous;
     prediction.history = previous->history;
+    prediction.history->last = prediction_pointer;
     
     predictor_accessor accessor (this, prediction);
     physics.run_predictor (predictor, accessor, previous->history->entity);
@@ -430,16 +435,7 @@ class time_steward {
       record_access (accessed, prediction->latest_access);
     }
     
-    if (prediction.valid_until () <max_time && field_exists_after (physics:: field_for_predictor (prediction.history->predictor), prediction.history->entity, when)) {
-      upcoming_issues.insert {MISSING_NEXT_PREDICTION, prediction.valid_until, nullptr, prediction.history};
-    }
-    prediction_may_predict_event (prediction);
-  }
-  void prediction_may_predict_event (prediction_type & prediction) {
-    extended_time event_time = next_event_time (prediction);
-    if (prediction.result_function && event_time >prediction.made_at && event_time <= prediction.valid_until) {
-      upcoming_issues.insert {MISSING_PREDICTED_EVENT, event_time, nullptr, & prediction};
-    }
+    upcoming_issues.insert (prediction.latest_access);
   }
   
   extended_time prediction_history_next_attention_time (prediction_history const & history) {
@@ -461,10 +457,10 @@ class time_steward {
     return search_from;
   }
   
-  siphash_id predicted_event_time_ID (prediction_history const & history, time_type base_time, uint64_t iteration) {
+  static siphash_id predicted_event_time_ID (prediction_history const & history, time_type base_time, uint64_t iteration) {
     return siphash_id::combining (history.predictor, history.entity, base_time, iteration);
   }
-  siphash_id fiat_event_time_ID (time_type time, uint64_t distinguisher) {
+  static siphash_id fiat_event_time_ID (time_type time, uint64_t distinguisher) {
     //TODO: make this part of time_traits
     return siphash_id::combining (time, distinguisher);
   }
@@ -487,29 +483,37 @@ class time_steward {
     return {prediction.result_time, iteration, predicted_event_time_ID (history, prediction.result_time, iteration)};
   }
   
-  void handle_issue (issue_type issue) {
-    switch (issue.type) {
-      case MISSING_NEXT_PREDICTION: {
-        if (prediction_history_next_attention_time (*issue.predictor) == issue.time) {
-          make_prediction (issue.time,*issue.predictor);
-        }
-      } break;
-      case MISSING_PREDICTED_EVENT: {
-        if (prediction_history_next_attention_time (*issue.predictor) == issue.time) {
-          make_predicted_event (issue.time,*issue.predictor);
-        }
-      } break;
-      case EVENT_NOT_CORRECTLY_EXECUTED: {
-        event_type & event =*issue.event;
-        if (event.executed &&!event.access) {
-          undo_event (event);
-        }
-        if (event.valid) {
-          do_event (event);
-        }
-      } break;
+  bool issue_valid (access_pointer const & issue_pointer) {
+    auto & issue =*issue_pointer;
+    if (issue.event) {
+      return issue.event->access == & issue;
+    }
+    if (issue.prediction) {
+      return issue.prediction->latest_access == & issue && issue.prediction->history->last == issue.prediction;
+    }
+    return false;
+  }
+  void handle_issue (access_pointer const & issue_pointer) {
+    auto & issue =*issue_pointer;
+    if (issue.event) {
+      event_type & event =*issue.event;
+      assert (!event. executed_correctly);
+      if (event.access) {
+        undo_event (event);
+      }
+      if (event.function) {
+        do_event (event);
+      }
+    }
+    if (issue. prediction) {
+      prediction_type & prediction =*issue.prediction;
+      if (prediction.event.function && !prediction.event.access) {
+        do_event (prediction.event);
+      }
+      make_prediction (issue.time, issue.prediction);
     }
   }
+  
   
 public:
   void insert_fiat_event (time_type time, uint64_t distinguisher, event_function function) {
@@ -517,15 +521,42 @@ public:
     event_type & event = fiat_events [time .ID];
     event.time = time;
     event.function = function;
-    upcoming_issues.insert {EVENT_NOT_CORRECTLY_EXECUTED, time, event_pointer, nullptr};
+    //special case
+    event.access.reset (new access_info {event.time, & event, nullptr});
+    upcoming_issues.insert (event.access);
   }
   void erase_fiat_event (time_type time, uint64_t distinguisher) {
     auto iterator = fiat_events.find (fiat_event_time_ID (time, distinguisher));
     if (iterator != fiat_events.end ()) {
-      if (iterator->second.executed) {
+      //undo the event right away so that we can go ahead and delete it
+      //without leaving around invalid references
+      if (iterator->second.access) {
         undo_event (iterator->second);
       }
       fiat_events.erase (iterator);
+    }
+  }
+  
+  time_type first_possibly_incorrect_time () const {
+    if (upcoming_issues.data.empty () ) {
+      return max_time; 
+    }
+    return upcoming_issues.data.top ()->time;
+  }
+  void update_once () {
+    if (!upcoming_issues.data.empty () ) {
+      if (issue_valid (upcoming_issues.data.top ())) {
+        handle_issue (upcoming_issues.data.top ());
+      }
+      upcoming_issues.data.pop ();
+    }
+  }
+  void update_through (time_type time) {
+    while (!upcoming_issues.data.empty () && upcoming_issues.data.top ()->time.base_time <= time) {
+      if (issue_valid (upcoming_issues.data.top ())) {
+        handle_issue (upcoming_issues.data.top ());
+      }
+      upcoming_issues.data.pop ();
     }
   }
 };
