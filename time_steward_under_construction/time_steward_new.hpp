@@ -108,10 +108,10 @@ class time_steward {
   template <typename field_identifier>
   struct field_history {
     typedef physics:: data_for <field_identifier> field_data;
-    typedef std:: pair <intrusive_pointer <event_type>, field_data> change;
+    typedef std:: pair <access_pointer, field_data> change;
     
     std:: vector <change> changes;
-    std:: vector <intrusive_pointer <event_type>> existence_changes;
+    std:: vector <access_pointer> existence_changes;
     physics:: data_for_each_predictor_watching <field_identifier, prediction_history> prediction_histories;
     
     bool exists_before (extended_time time) {
@@ -144,12 +144,11 @@ class time_steward {
     //but for now, I'm just going to be extra memory-safe.
     intrusive_pointer <prediction_type> previous;
     extended_time made_at;
-    extended_time valid_until;
+    extended_time & valid_until () {return event.time;}
+    time_type & result_time () {return event.time.base_time;}
     access_pointer latest_access;
     
-    time_type result_time;
-    event_function result_function;
-    intrusive_pointer <event_type> last_event;
+    event_type event;
   };
   struct prediction_history {
     predictor_index predictor;
@@ -157,19 +156,17 @@ class time_steward {
     intrusive_pointer <prediction_type> last;
   }
   struct event_type: public boost::intrusive_ref_counter <event_type> {
-    intrusive_pointer <event_type> previous_from_same_prediction;
     extended_time time;
-    bool valid;
+    event_function function;
+    //the following 2 members could be compressed in memory a bit,
+    //if that turns out to be valuable
+    bool executed;
     std::vector <entity_ID> modified;
   };
   struct access_info: public boost::intrusive_ref_counter <access_info> {
-    //the time variable is possibly redundant?
-    //If we reference-count events, then we can just use event->time.
-    //(Right now, event is null if this was an access by a prediction.)
-    //For the initial implementation, though, we don't care about optimizing the
-    //space usage of this struct.
+    //only one pointer is non-null at a time, so we could compress this
     extended_time time;
-    intrusive_pointer <event_type> event;
+    event_type* event;
     intrusive_pointer <prediction_type> prediction;
   };
   struct access_history {
@@ -271,7 +268,9 @@ class time_steward {
   template <typename field_identifier>
   void undo_field_change (extended_time time, entity_ID ID) {
     auto & history = field_histories.get <field_identifier> ();
-    erase_field_changes_since <field_identifier> (history, time);
+    if (there's still a change at time) {
+      erase_field_changes_since <field_identifier> (history, time);
+    }
   }
 
   //we want these to be static members, but we can't figure out how to
@@ -301,11 +300,11 @@ class time_steward {
     if (access->prediction) {
       auto & history =*access->prediction->history;
       bool needs_replacement = access->prediction.made_at <time;
-      if (time <access->prediction->valid_until ||
+      if (time <access->prediction->valid_until () ||
           //when we undo an event, we also want to remove all references
           //to that event, including old predictions that were valid until that event.
-          (undoing_event && time == access->prediction->valid_until)) {
-        while you will will will you will yeah (history.last != access->prediction) {
+          (undoing_event && time == access->prediction->valid_until ())) {
+        while (history.last != access->prediction) {
           assert (history.last->made_at >= time);
           invalidate_prediction (*history.last);
         }
@@ -342,33 +341,26 @@ class time_steward {
     prediction.history->last = prediction.previous;
     prediction.history = nullptr;
     prediction.previous = nullptr;
-    prediction.result_function = nullptr;
     prediction.latest_access = nullptr;
-    while (prediction.last_event) {
-      invalidate_event_completely (*prediction.last_event);
-      prediction.last_event = prediction.last_event->previous_from_same_prediction;
-    }
+    invalidate_event_completely (prediction.event);
   }
   void invalidate_prediction_after (prediction_type & prediction, extended_time time) {
-    assert (time < prediction.valid_until);
+    assert (time < prediction.valid_until ());
     if (time <= prediction.made_at) {
       invalidate_prediction (*prediction);
     }
     else {
-      prediction.valid_until = time;
-      prediction.latest_access.reset (new access_info {prediction.valid_until, nullptr, &prediction});
-      while (prediction.last_event && prediction.last_event->time >= time) {
-        invalidate_event_completely (*prediction.last_event);
-        prediction.last_event = prediction.last_event->previous_from_same_prediction;
-      }
+      invalidate_event_completely (prediction.event);
+      prediction.valid_until () = time;
+      prediction.latest_access.reset (new access_info {prediction.valid_until (), nullptr, &prediction});
     }
   }
   void invalidate_event_completely (event_type & event) {
+    assert (event.function);
+    event.function = nullptr;
     if (event.executed) {
       invalidate_event_result (event);
     }
-    assert (event.valid);
-    event.valid = false;
   }
   void invalidate_event_results (event_type & event) {
     assert (event.executed);
@@ -431,13 +423,14 @@ class time_steward {
     
     predictor_accessor accessor (this, prediction);
     physics.run_predictor (predictor, accessor, previous->history->entity);
-    //that sets prediction.valid_until and prediction.prediction
+    //that sets prediction.event.time and prediction.event.function
     
-    prediction.latest_access.reset (new access_info {prediction.valid_until, nullptr, prediction_pointer});
+    prediction.latest_access.reset (new access_info {prediction.valid_until (), nullptr, prediction_pointer});
     for (auto accessed: accessor.accessed) {
       record_access (accessed, prediction->latest_access);
     }
-    if (prediction.valid_until <max_time && field_exists_after (physics:: field_for_predictor (prediction.history->predictor), prediction.history->entity, when)) {
+    
+    if (prediction.valid_until () <max_time && field_exists_after (physics:: field_for_predictor (prediction.history->predictor), prediction.history->entity, when)) {
       upcoming_issues.insert {MISSING_NEXT_PREDICTION, prediction.valid_until, nullptr, prediction.history};
     }
     prediction_may_predict_event (prediction);
@@ -447,17 +440,6 @@ class time_steward {
     if (prediction.result_function && event_time >prediction.made_at && event_time <= prediction.valid_until) {
       upcoming_issues.insert {MISSING_PREDICTED_EVENT, event_time, nullptr, & prediction};
     }
-  }
-  void make_predicted_event (standard_time when, prediction_type & prediction) {
-    intrusive_pointer <event_type> event_pointer (new event_type ());
-    event_type & event =*event_pointer;
-    event.valid = true;
-    event.time = when;
-    event.function = prediction.result_function;
-    event.previous_from_same_prediction.swap (prediction.last_event);
-    prediction.last_event = event_pointer;
-    upcoming_issues.insert {EVENT_NOT_CORRECTLY_EXECUTED, when, event_pointer, nullptr};
-    prediction_may_predict_event (prediction);
   }
   
   extended_time prediction_history_next_attention_time (prediction_history const & history) {
@@ -531,18 +513,18 @@ class time_steward {
   
 public:
   void insert_fiat_event (time_type time, uint64_t distinguisher, event_function function) {
-    intrusive_pointer <event_type> event_pointer (new event_type ());
-    event_type & event =*event_pointer;
-    event.valid = true;
-    event.time = {time, 1ull << 63, fiat_event_time_ID (time, distinguisher)};
+    extended_time time = {time, 1ull << 63, fiat_event_time_ID (time, distinguisher)};
+    event_type & event = fiat_events [time .ID];
+    event.time = time;
     event.function = function;
-    fiat_events.insert (std::make_pair (event.time .ID, event_pointer));
     upcoming_issues.insert {EVENT_NOT_CORRECTLY_EXECUTED, time, event_pointer, nullptr};
   }
   void erase_fiat_event (time_type time, uint64_t distinguisher) {
     auto iterator = fiat_events.find (fiat_event_time_ID (time, distinguisher));
     if (iterator != fiat_events.end ()) {
-      invalidate_event (*iterator->second);
+      if (iterator->second.executed) {
+        undo_event (iterator->second);
+      }
       fiat_events.erase (iterator);
     }
   }
