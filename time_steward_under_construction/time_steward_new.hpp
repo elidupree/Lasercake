@@ -139,7 +139,7 @@ class time_steward {
   struct prediction_history;
   struct prediction_type: public boost::intrusive_ref_counter <prediction_type> {
     //null if this prediction is invalid
-    prediction_history*history;
+    prediction_history_type*history;
     //this could presumably be a regular pointer,
     //but for now, I'm just going to be extra memory-safe.
     intrusive_pointer <prediction_type> previous;
@@ -150,9 +150,10 @@ class time_steward {
     
     event_type event;
   };
-  struct prediction_history {
+  struct prediction_history_type {
     predictor_index predictor;
     entity_ID entity;
+    access_pointer issue;
     intrusive_pointer <prediction_type> last;
   }
   struct event_type: public boost::intrusive_ref_counter <event_type> {
@@ -164,10 +165,18 @@ class time_steward {
     std::vector <entity_ID> modified;
   };
   struct access_info: public boost::intrusive_ref_counter <access_info> {
-    //only one pointer is non-null at a time, so we could compress this
+    //only one pointer is non-null at a time, so we could compress this.
+    //Perhaps a boost::variant would be appropriate?
     extended_time time;
     event_type* event;
     intrusive_pointer <prediction_type> prediction;
+    prediction_history_type*prediction_history;
+    access_info (extended_time time, event_type*event):
+      time (time), event (event), prediction (nullptr), prediction_history (nullptr) {}
+    access_info (extended_time time, intrusive_pointer <prediction_type> const & prediction):
+      time (time), event (nullptr), prediction (prediction), prediction_history (nullptr) {}
+    access_info (extended_time time, prediction_history_type*prediction_history):
+      time (time), event (nullptr), prediction (nullptr), prediction_history (prediction_history) {}
   };
   struct access_history {
     struct sort {bool operator< (access_pointer const & alpha, access_pointer const & beta) const {
@@ -257,7 +266,7 @@ class time_steward {
       if (!exists_before) {
         history.existence_changes.push_back (accessor.now ());
         for (auto const & prediction_history: history.prediction_histories) {
-          upcoming_issues.insert {MISSING_NEXT_PREDICTION, accessor.now (), nullptr, & prediction_history};
+          note_prediction_history_issue (prediction_history, accessor.now ());
         };
       }
     }
@@ -323,9 +332,7 @@ class time_steward {
         else {
           invalidate_prediction_after (*access->prediction, time);
         }
-        if (history.last&& field_exists_after (physics:: field_for_predictor (history->predictor), history->entity, history.last->valid_until)) {
-          upcoming_issues.insert {MISSING_NEXT_PREDICTION, history.last->valid_until, nullptr, & history};
-        }
+        note_next_prediction_history_issue (history); 
       }
       if (needs_replacement) {
         history.bounded_accesses.push (prediction.latest_access);
@@ -354,7 +361,7 @@ class time_steward {
     else {
       invalidate_event_completely (prediction.event);
       prediction.valid_until () = time;
-      prediction.latest_access.reset (new access_info {prediction.valid_until (), nullptr, &prediction});
+      prediction.latest_access.reset (new access_info (time, prediction));
     }
   }
   void invalidate_event_completely (event_type & event) {
@@ -388,7 +395,7 @@ class time_steward {
   void do_event (event_type & event) {
     event_accessor accessor (this, event.time);
     event.function () (accessor);
-    event.access.reset (new access_info {event.time, & event, nullptr});
+    event.access.reset (new access_info (event.time, & event));
     for (auto accessed: accessor.accessed) {
       record_access (accessed, event.access);
     }
@@ -418,6 +425,37 @@ class time_steward {
     event.access = nullptr;
   }
   
+  void note_prediction_history_issue (prediction_history_type & history, extended_time time) {
+    if (!history.issue || history.issue.time >time) {
+      if (history.issue) history.issue->prediction_history = nullptr;
+      history.issue.reset (new access_info (time, & history);
+      upcoming_issues.insert (history.issue);
+    }
+  }
+  void note_next_prediction_history_issue (prediction_history_type & history) {
+    extended_time search_from;
+    if (history.last) {
+      if (history.last->event.function && !history.last->event.executed ()) {
+        note_prediction_history_issue (history, history.last->event.time);
+        return;
+      }
+      search_from = history.last->valid_until ();
+    }
+    else {
+      search_from = min_extended_time;
+    }
+    auto transition = next_existence_transition (field_for_predictor (history.predictor), history.entity, search_from);
+    if (transition.started_existing) {
+      if (transition.time <max_time) {
+        note_prediction_history_issue (history, transition.time);
+      }
+    }
+    else {
+      note_prediction_history_issue (history, search_from);
+    }    
+    return search_from;
+  }
+  
   void make_prediction (extended_time when, intrusive_pointer <prediction_type> const & previous) {
     intrusive_pointer <prediction_type> prediction_pointer (new prediction_type);
     prediction_type & prediction =*prediction_pointer;
@@ -430,31 +468,12 @@ class time_steward {
     physics.run_predictor (predictor, accessor, previous->history->entity);
     //that sets prediction.event.time and prediction.event.function
     
-    prediction.latest_access.reset (new access_info {prediction.valid_until (), nullptr, prediction_pointer});
+    prediction.latest_access.reset (new access_info (prediction.valid_until (), prediction_pointer));
     for (auto accessed: accessor.accessed) {
       record_access (accessed, prediction->latest_access);
     }
     
-    upcoming_issues.insert (prediction.latest_access);
-  }
-  
-  extended_time prediction_history_next_attention_time (prediction_history const & history) {
-    extended_time search_from;
-    if (history.last) {
-      if (history.last->result_function) {
-        extended_time event_time = next_event_time (*history.last);
-        if (event_time >prediction.made_at && event_time <= prediction.valid_until) {
-          return event_time;
-        }
-      }
-      search_from = history.last->valid_until;
-    }
-    else {
-      search_from = min_extended_time;
-    }
-    auto transition = next_existence_transition (field_for_predictor (history.predictor), history.entity, search_from);
-    if (transition.started_existing) return transition.time;
-    return search_from;
+    note_next_prediction_history_issue (prediction.history);
   }
   
   static siphash_id predicted_event_time_ID (prediction_history const & history, time_type base_time, uint64_t iteration) {
@@ -488,8 +507,8 @@ class time_steward {
     if (issue.event) {
       return issue.event->access == & issue;
     }
-    if (issue.prediction) {
-      return issue.prediction->latest_access == & issue && issue.prediction->history->last == issue.prediction;
+    if (issue.prediction_history) {
+      return issue.prediction_history->issue == & issue;
     }
     return false;
   }
@@ -505,12 +524,13 @@ class time_steward {
         do_event (event);
       }
     }
-    if (issue. prediction) {
-      prediction_type & prediction =*issue.prediction;
-      if (prediction.event.function && !prediction.event.access) {
-        do_event (prediction.event);
+    if (issue.prediction_history) {
+      prediction_history_type & history =*issue.prediction_history;
+      if (history.last && history.last->event.function && ! history.last->event.executed ()) {
+        do_event (history.last->event);
       }
-      make_prediction (issue.time, issue.prediction);
+      history.issue = nullptr;
+      make_prediction (issue.time, history.last);
     }
   }
   
@@ -522,7 +542,7 @@ public:
     event.time = time;
     event.function = function;
     //special case
-    event.access.reset (new access_info {event.time, & event, nullptr});
+    event.access.reset (new access_info (event.time, & event));
     upcoming_issues.insert (event.access);
   }
   void erase_fiat_event (time_type time, uint64_t distinguisher) {
