@@ -204,7 +204,7 @@ class time_steward {
       //TODO: the unordered_map is only for uniquing. As an optimization,
       //we should be able to use a boost::small_vector and a borrowed_bitset.
       fields_accessed.emplace (ID, physics:: field_index <field_identifier> ());
-      auto result = steward_->get_provisional_field_future <fields_identifier> (ID, time_);
+      auto result = steward_->get_provisional_field_future <field_identifier> (ID, time_);
       if (result.second < prediction_->valid_until ()) {
         prediction_->valid_until () = result.second;
         prediction_->event.function = nullptr;
@@ -241,12 +241,32 @@ class time_steward {
       prediction_->event.time = event_time;
     }
     
-    typedef event_accessor event_accessor;
+    typedef event_accessor & for_event;
     
     predictor_accessor (predictor_accessor const &) = delete;
     predictor_accessor (predictor_accessor &&) = delete;
     predictor_accessor & operator= (predictor_accessor const &) = delete;
     predictor_accessor & operator= (predictor_accessor &&) = delete;
+  };
+  class outer_accessor {
+  private:
+    time_steward const*steward_;
+    extended_time time_;
+    
+    outer_accessor (time_steward const*steward, extended_time time):
+      steward_(steward), time_(time) {}
+  public:
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
+      return steward_->get_provisional_field_before <field_identifier> (ID, time_);
+    }
+    time_type now () const {
+      return time_.base_time;
+    }
+    //you're still not supposed to store these things, because they might become invalid,
+    //but unlike the other accessor types, it's not inherently unsafe to copy them,
+    //so we don't delete the copy constructors and assignment operators
+    //like we do with other accessor types.
   };
   
   template <typename field_identifier>
