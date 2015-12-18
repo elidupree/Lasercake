@@ -175,12 +175,79 @@ class time_steward {
     siphash_id random_id () {
       return RNG_.random_id ();
     }
+    time_type now () const {
+      return time_.base_time;
+    }
     event_accessor (event_accessor const &) = delete;
     event_accessor (event_accessor &&) = delete;
     event_accessor & operator= (event_accessor const &) = delete;
     event_accessor & operator= (event_accessor &&) = delete;
   };
-  class predictor_accessor
+  class predictor_accessor {
+  private:
+    friend class time_steward;
+    
+    time_steward const*steward_;
+    extended_time time_;
+    prediction_type*prediction_;
+    
+    std::unordered_set <field_ID> fields_accessed;
+    
+    predictor_accessor (time_steward const*steward, extended_time time, prediction_type*prediction):
+      steward_(steward), time_(time), prediction_(prediction) {
+      prediction_->valid_until () = max_extended_time;
+    }
+    
+  public:
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
+      //TODO: the unordered_map is only for uniquing. As an optimization,
+      //we should be able to use a boost::small_vector and a borrowed_bitset.
+      fields_accessed.emplace (ID, physics:: field_index <field_identifier> ());
+      auto result = steward_->get_provisional_field_future <fields_identifier> (ID, time_);
+      if (result.second < prediction_->valid_until ()) {
+        prediction_->valid_until () = result.second;
+        prediction_->event.function = nullptr;
+      }
+      return result.first;
+    }
+    inline void predict (time_type predicted_time, event_function predicted_function) {
+      if (predicted_time < time_.base_time) { return; }
+      if (predicted_time > prediction_->valid_until ().base_time) {return;}
+      extended_time event_time;
+      event_time.base_time = predicted_time;
+      if (predicted_time == time_.base_time) {
+        siphash_id candidate_ID = predicted_event_time_ID (
+          prediction_->history->predictor, prediction_->history->entity,
+          predicted_time, time_.iteration);
+        if (candidate_ID >time_.ID) {
+          event_time.iteration = time_.iteration;
+          event_time .ID = candidate_ID;
+        }
+        else {
+          event_time.iteration = time_.iteration + 1;
+        }
+      }
+      else {
+        event_time.iteration = 0;
+      }
+      if (!event_time.ID) {
+        event_time .id =predicted_event_time_ID (
+          prediction_->history->predictor, prediction_->history->entity,
+          predicted_time, event_time.iteration);
+      }
+      if (event_time >prediction_->valid_until ()) {return;}
+      prediction_->event.function = predicted_function;
+      prediction_->event.time = event_time;
+    }
+    
+    typedef event_accessor event_accessor;
+    
+    predictor_accessor (predictor_accessor const &) = delete;
+    predictor_accessor (predictor_accessor &&) = delete;
+    predictor_accessor & operator= (predictor_accessor const &) = delete;
+    predictor_accessor & operator= (predictor_accessor &&) = delete;
+  };
   
   template <typename field_identifier>
   struct field_history {
