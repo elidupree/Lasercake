@@ -28,10 +28,45 @@ namespace time_steward_system {
 
 namespace implementation {
 
-template <typename physics_list, typename time_traits = default_time_traits>
-struct physics {
+struct empty_list {};
+template <typename head_type, class tail_type> struct nonempty_list {typedef head_type head; typedef tail_type tail;};
+template <typename... Input> struct list_flatten_1;
+template <> struct list_flatten_1 <> {typedef empty_list type;};
+template <typename list_head, typename list_tail, typename... tail> struct list_flatten_1 <nonempty_list <list_head, list_tail>, tail...> {typedef list_flatten_1 <list_head, list_tail, tail...>::type type;};
+template <typename head, typename... tail> struct list_flatten_1 <head, tail...> {typedef nonempty_list <head, list_flatten_1 <tail...>::type type;};
+template <typename... input> using flatten_list = typename list_flatten_1 <input...>::type;
+
+template <class list, class filter> struct list_filter_1 {typedef list_filter_2 <list, filter>::type type;};
+template <class filter> struct list_filter_1 <empty_list, filter> {typedef empty_list type;};
+template <class list, class filter, bool head_passes = filter::passes <list::head>> struct list_filter_2;
+template <class list, class filter> struct list_filter_2 <list, filter, true> {struct type {typedef list::head head; typedef list_filter_1 <list::tail, filter> ::type tail;};};
+template <class list, class filter> struct list_filter_2 <list, filter, false> {typedef list_filter_1 <list::tail, filter>::type type;};
+template <class list, class filter> using filter_list = typename list_filter_1 <list, filter>::type;
+
+template <typename ID, typename list, bool equal = std::is_same <ID, list:: head:: identifying_type>> struct field_selector;
+template <typename ID, typename list> struct field_selector <ID, list, true> {typedef list::head type;};
+template <typename ID, typename list> struct field_selector <ID, list, false> {typedef field_selector <ID, list::tail>::type;};
+template <typename ID, typename list> using select_field <ID, list> = typename field_selector <ID, list>::type;
+
+struct field_base {};
+template <stuff>
+struct field: public field_base {
 
 };
+
+struct field_filter {template <typename input> static constexpr bool passes () {return std::is_base_of <field_base, input>::value;}};
+
+
+template <class list, class time_traits = default_time_traits>
+struct physics {
+  typedef filter_list <list, field_filter> fields;
+  typedef filter_list <list, predictor_filter> predictors;
+};
+
+
+
+template <typename ID, typename physics> using data_for <ID, physics> = typename select_field <ID, physics::fields>::data_type;
+
 
 //Hack: I copied the standard library implementation of upper/lower_bound,
 //in order to search a range by a different type than the type in the range,
@@ -748,7 +783,7 @@ public:
 }//End namespace implementation
 
 using implementation:: time_steward;
-using implementation:: physics_list;
+using physics_list = implementation::flatten_list;
 
 }//end namespace time_steward_system
 
