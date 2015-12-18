@@ -49,21 +49,43 @@ template <typename ID, typename list> struct field_selector <ID, list, false> {t
 template <typename ID, typename list> using select_field <ID, list> = typename field_selector <ID, list>::type;
 
 struct field_base {};
-template <stuff>
+template <typename field_identifier, typename field_data>
 struct field: public field_base {
-
+  typedef field_identifier identifying_type;
+  typedef field_data data_type;
 };
 
-struct field_filter {template <typename input> static constexpr bool passes () {return std::is_base_of <field_base, input>::value;}};
+struct predictor_base {};
+template <typename field_identifier, template <typename Accessor> void (Accessor, entity_ID) function>
+struct predictor: public predictor_base {
+  typedef field_identifier field;
+  template <typename Accessor>
+  static inline void call (Accessor accessor, entity_ID ID) {
+    function <Accessor> (accessor, ID);
+  }
+};
+
+template <typename base>
+struct base_filter {template <typename input> static constexpr bool passes () {return std::is_base_of <base, input>::value;}};
 
 
-template <class list, class time_traits = default_time_traits>
+template <class list, class time_traits_type = default_time_traits>
 struct physics {
-  typedef filter_list <list, field_filter> fields;
-  typedef filter_list <list, predictor_filter> predictors;
+  typedef filter_list <list, base_filter <field_base>> fields;
+  typedef filter_list <list, base_filter <predictor_base>> predictors;
+  typedef time_traits_type time_traits;
 };
 
-
+template <template <typename> class data, class fields>
+struct data_for_each_field {
+  typedef fields::head::identifying_type head_ID;
+  data <head_ID> head;
+  data_for_each_field <data, fields::tail> tail;
+  template <typename ID> inline std::enable_if_t <std::is_same <ID, head_ID>::value, data <ID>> & get () {return head;}
+  template <typename ID> inline std::enable_if_t <!std::is_same <ID, head_ID>::value, data <ID>> & get () {return tail.get <ID> ();}
+}
+template <template <typename> class data>
+struct data_for_each_field <data, empty_list> {};
 
 template <typename ID, typename physics> using data_for <ID, physics> = typename select_field <ID, physics::fields>::data_type;
 
