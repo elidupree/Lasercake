@@ -103,7 +103,84 @@ class time_steward {
   
   typedef std:: function <void (event_accessor &)> event_function;
   
-  
+  class event_accessor {
+  private:  
+    friend class time_steward;
+    
+    template <typename field_identifier>
+    struct field_info {
+      typedef physics:: data_for <field_identifier> field_data;
+      field_data data;
+      bool accessed_old_state;
+      bool possibly_modified;
+      field_info (field_data const & data, accessed, modified):
+        data (data), accessed_old_state (accessed), possibly_modified (modified) {}
+    };
+    template <typename field_identifier>
+    struct field_info_map {
+      std::unordered_map <field_info <field_identifier>> data;
+    };    
+        
+    time_steward const*steward_;
+    extended_time time_;
+    siphash_random_generator RNG_;
+    
+    physics:: data_for_each_field <field_info_map> entities_;
+    
+    event_accessor (time_steward const*steward, extended_time time):
+      steward_ (steward), time_(time), RNG_(time.ID) {}
+    
+    template <typename field_identifier, bool mutable>
+    inline physics:: data_for <field_identifier> & get_implementation (entity_ID ID) {
+      auto & map = entities_.get <field_identifier> ();
+      auto & iterator = map.find (ID);
+      if (iterator == map.end ()) {
+        auto result = map.emplace (ID, steward_->get_provisional_field_before <field_identifier> (ID, time_), true, mutable);
+        assert (result.second);
+        iterator = result.first;
+      }
+      else if (mutable) {
+        iterator->second.possibly_modified = true;
+      }
+      return iterator->second.data;
+    }
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> & set_implementation (entity_ID ID, physics: data_for <field_identifier> const & new_data) {
+      auto & map = entities_.get <field_identifier> ();
+      auto & iterator = map.find (ID);
+      if (iterator == map.end ()) {
+        auto result = map.emplace (ID, new_data, false, true);
+        assert (result.second);
+        iterator = result.first;
+      }
+      return iterator->second.data;
+    }
+
+  public:
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
+      return get_implementation <field_identifier, false> (ID);
+    }
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> & get_mutable (entity_ID ID) {
+      return get_implementation <field_identifier, true> (ID);
+    }
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> & set (entity_ID ID, physics:: data_for <field_identifier> const & new_data) {
+      return set_implementation <field_identifier> (ID, new_data);
+    }
+    uint64_t random_bits (uint32_t bits) {
+      return RNG_.random_bits (bits);
+    }
+    siphash_id random_id () {
+      return RNG_.random_id ();
+    }
+    event_accessor (event_accessor const &) = delete;
+    event_accessor (event_accessor &&) = delete;
+    event_accessor & operator= (event_accessor const &) = delete;
+    event_accessor & operator= (event_accessor &&) = delete;
+  };
+  class predictor_accessor
   
   template <typename field_identifier>
   struct field_history {
