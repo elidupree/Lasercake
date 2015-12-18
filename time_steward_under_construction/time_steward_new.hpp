@@ -74,6 +74,43 @@ struct physics {
   typedef filter_list <list, base_filter <field_base>> fields;
   typedef filter_list <list, base_filter <predictor_base>> predictors;
   typedef time_traits_type time_traits;
+  struct extended_time {
+    time_traits::type base_time;
+    uint64_t iteration;
+    siphash_id ID;
+    
+    static const extended_time max {time_traits::max, uint64_t (-1), siphash_id::greatest ()};
+    static const extended_time min {time_traits::min, 0, siphash_id::least ()};
+    static const extended_time never {time_traits::never, 0, siphash_id::null ()};
+    
+    explicit operator bool () const {return bool (ID);}
+    bool operator< (extended_time const & other) const {
+      if (base_time != other.base_time) return base_time <other.base_time;
+      if (iteration != other.iteration) return iteration <other.iteration;
+      return ID <other.ID;
+    }
+    bool operator<=(extended_time const & other) const {
+      if (base_time != other.base_time) return base_time <other.base_time;
+      if (iteration != other.iteration) return iteration <other.iteration;
+      return ID <=other.ID;
+    }
+    bool operator> (extended_time const & other) const {
+      if (base_time != other.base_time) return base_time >other.base_time;
+      if (iteration != other.iteration) return iteration >other.iteration;
+      return ID >other.ID;
+    }
+    bool operator>=(extended_time const & other) const {
+      if (base_time != other.base_time) return base_time >other.base_time;
+      if (iteration != other.iteration) return iteration >other.iteration;
+      return ID >=other.ID;
+    }
+    bool operator== (extended_time const & other) const {
+      return other.base_time == base_time && other.iteration == iteration && other.ID == ID;
+    }
+    bool operator== (extended_time const & other) const {
+      return other.base_time != base_time || other.iteration != iteration || other.ID != ID;
+    }
+  };
 };
 
 template <template <typename> class data, class fields>
