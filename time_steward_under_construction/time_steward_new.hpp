@@ -187,9 +187,10 @@ template<typename _ForwardIterator, typename _Tp, typename _Compare>
     
 enum auditing_level_type {
   NONE,
+  MINIMAL,  
   CONSTANT_FACTOR,
-  HEAVY_DUTY,
-  EXCESSIVE
+  HISTORY_LENGTH_FACTOR,
+  ENTIRE_STEWARD_FACTOR
 };
 using intrusive_pointer = boost::intrusive_ptr
 template <typename physics, auditing_level_type auditing_level>
@@ -335,8 +336,6 @@ class time_steward {
       prediction_->event.time = event_time;
     }
     
-    typedef event_accessor & for_event;
-    
     predictor_accessor (predictor_accessor const &) = delete;
     predictor_accessor (predictor_accessor &&) = delete;
     predictor_accessor & operator= (predictor_accessor const &) = delete;
@@ -361,6 +360,14 @@ class time_steward {
     //but unlike the other accessor types, it's not inherently unsafe to copy them,
     //so we don't delete the copy constructors and assignment operators
     //like we do with other accessor types.
+  };
+  
+  class predictor_accessor_pointer {
+  private:
+    predictor_accessor*data;
+  public:
+    predictor_accessor*operator->() const {return data;}
+    typedef event_accessor*for_event;
   };
   
   template <typename field_identifier>
@@ -684,18 +691,18 @@ class time_steward {
   }
   
   void note_prediction_history_issue (prediction_history_type & history, extended_time time) {
+    if (time == extended_time::max) return;
     if (!history.issue || history.issue.time >time) {
       if (history.issue) history.issue->prediction_history = nullptr;
       history.issue.reset (new access_info (time, & history);
       upcoming_issues.insert (history.issue);
     }
   }
-  void note_next_prediction_history_issue (prediction_history_type & history) {
+  void next_prediction_history_issue_time (prediction_history_type const & history) {
     extended_time search_from;
     if (history.last) {
       if (history.last->event.function && !history.last->event.executed ()) {
-        note_prediction_history_issue (history, history.last->event.time);
-        return;
+        return history.last->event.time;
       }
       search_from = history.last->valid_until ();
     }
@@ -704,15 +711,13 @@ class time_steward {
     }
     auto transition = next_existence_transition (field_for_predictor (history.predictor), history.entity, search_from);
     if (transition.started_existing) {
-      if (transition.time <max_time) {
-        note_prediction_history_issue (history, transition.time);
-      }
+      return transition.time;
     }
-    else {
-      note_prediction_history_issue (history, search_from);
-    }    
     return search_from;
   }
+  void note_next_prediction_history_issue (prediction_history_type & history) {
+    note_prediction_history_issue (next_prediction_history_issue_time (history));
+  }  
   
   void make_prediction (extended_time when, intrusive_pointer <prediction_type> const & previous) {
     intrusive_pointer <prediction_type> prediction_pointer (new prediction_type);
@@ -792,7 +797,66 @@ class time_steward {
     }
   }
   
+  //invariants:
+  void validate_prediction_history_constant (prediction_history_type const & history) {
+    //each history has a valid issue if and only if it should
+    extended_time time = next_prediction_history_issue_time (history);
+    if (time == extended_time::max) assert (!history.issue);
+    else {
+      assert (history.issue);
+      assert (history.issue->prediction_history == & history);
+      assert (history.issue->time == time);
+      validate_access (*history.issue);
+    }
+    if (history.last) {
+      assert (time >= history.last->valid_until ());
+    }
+  }
+  void validate_access (access_info const & access) {
+    //an access only has one pointer, and except for predictors, it must
+    //still be current
+    if (access.event) {
+      assert (!access.prediction);
+      assert (!access.prediction_history);
+      assert (access.event->access == & access);
+      //note that the event is NOT required to have the same time as the access
+    }
+    if (access.prediction_history) {
+      assert (!access.prediction);
+      assert (access.prediction_history->issue == & access);
+    }
+  }
+  void validate_prediction (prediction_type const & prediction) {
+    //predictions must come in order
+    if (prediction.previous) {
+      assert (prediction.previous->valid_until () <= prediction.made_at);
+    }
+    //if valid, predictions must cover any time, and have a valid access
+    if (prediction.history) {
+      assert (prediction.valid_until () >prediction.made_at);
+      assert (prediction.latest_access);
+      assert (prediction.latest_access->time == prediction.valid_until ());
+      validate_event (prediction.event);
+    }
+  }
+  void validate_event (event_type const & event) {
+    if (event.executed_correctly) {
+      assert (event.executed ());
+      assert (event.access->time == event.time);
+    }
+    if (event.modified.size () >0) assert (event.executed ());
+    if (event.access) {
+      assert (event.access->event == & event);
+      validate_access (*event.access);
+    }
+  }
   
+  void validate_prediction_history_linear (prediction_history_type const & history) {
+    validate_prediction_history_constant (history);
+    for (prediction_type*prediction = history.last; prediction; prediction = prediction->previous) {
+      validate_prediction (*prediction);
+    }
+  }
 public:
   void insert_fiat_event (time_type time, uint64_t distinguisher, event_function function) {
     extended_time time = {time, 1ull << 63, fiat_event_time_ID (time, distinguisher)};
