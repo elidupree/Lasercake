@@ -68,6 +68,12 @@ struct predictor: public predictor_base {
 template <typename base>
 struct base_filter {template <typename input> static constexpr bool passes () {return std::is_base_of <base, input>::value;}};
 
+struct default_time_traits {
+  typedef int64_t type;
+  static const type never = std::numeric_limits <type>::min ();
+  static const type min = never + 1;
+  static const type max = std::numeric_limits <type>::max ();
+};
 
 template <class list, class time_traits_type = default_time_traits>
 struct physics {
@@ -124,7 +130,27 @@ struct data_for_each_field {
 template <template <typename> class data>
 struct data_for_each_field <data, empty_list> {};
 
+template <template <typename> class function, class list, typename... Arguments>
+inline void call_for_each (Arguments const &... arguments);
+template <template <typename> class function, class head, class tail, typename... Arguments>
+inline void call_for_each <function, nonempty_list <head, tail>, Arguments> (Arguments &&... arguments) {
+  function<head>::apply (arguments...);
+  call_for_each <function, tail, Arguments> (arguments...);
+}
+template <template <typename> class function, typename... Arguments>
+inline void call_for_each <function, empty_list, Arguments> (Arguments const &... arguments) {}
+
 template <typename ID, typename physics> using data_for <ID, physics> = typename select_field <ID, physics::fields>::data_type;
+
+template <typename Alpha, typename Bravo>
+auto verifiably_equal (Alpha const & alpha, Bravo const & bravo)
+->decltype (alpha == bravo) {return alpha == bravo;}
+bool verifiably_equal (...) {return false;}
+
+template <typename Alpha, typename Bravo>
+auto verifiably_unequal (Alpha const & alpha, Bravo const & bravo)
+->decltype (alpha != bravo) {return alpha != bravo;}
+bool verifiably_unequal (...) {return false;}
 
 
 //Hack: I copied the standard library implementation of upper/lower_bound,
@@ -485,11 +511,10 @@ class time_steward {
   //can sometimes apply to a whole group of fields, to minimize the number
   //of accesses we have to store.
   std::unordered_map <field_ID, access_history> access_histories;
-  //the only function of the fiat events container is to allow the client
-  //to delete fiat events by time/distinguisher.
+  //the keys are redundant with the ID in the event time.
   //Some optimization could be done here.
   //It's low priority because there are usually fewer fiat events than other things.
-  std::unordered_map <siphash_id, intrusive_pointer <event_type>> fiat_events;
+  std::unordered_map <siphash_id, event_type> fiat_events;
   issue_collector upcoming_issues;
   
   
@@ -522,12 +547,13 @@ class time_steward {
     //any redundant changes we stored would be deleted anyway,
     //so we don't have to store them.
     if (!exists_before &&!exists_after) {return false;}
-    //here would be the place to optimize by returning false if the
-    //DATA before and after were equal, if they are equality comparable
+    if (exists_before && exists_after && verifiably_equal
+      (history.data_before (accessor.now ()),
+       accessor.entities.get <field_identifier> (ID))) {return false;}
     
     erase_field_changes_since <field_identifier> (history, accessor.now ());
     if (exists_after) {
-      history.changes.emplace_back (std:: move (accessor.entities.get <field_identifier> ()));
+      history.changes.emplace_back (std:: move (accessor.entities.get <field_identifier> (ID)));
       if (!exists_before) {
         history.existence_changes.push_back (accessor.now ());
         for (auto const & prediction_history: history.prediction_histories) {
@@ -797,7 +823,9 @@ class time_steward {
     }
   }
   
-  //invariants:
+  //some validation functions to make sure the invariants are maintained.
+  //It's unfortunate that the words "validate", for these functions,
+  //and "invalidate", for the others, have completely unrelated meanings.
   void validate_prediction_history_constant (prediction_history_type const & history) {
     //each history has a valid issue if and only if it should
     extended_time time = next_prediction_history_issue_time (history);
@@ -855,6 +883,57 @@ class time_steward {
     validate_prediction_history_constant (history);
     for (prediction_type*prediction = history.last; prediction; prediction = prediction->previous) {
       validate_prediction (*prediction);
+    }
+  }
+  
+  template <class field>
+  void validate_field_history_linear () {
+    auto const & history = field_histories.get <field::identifying_type> ();
+    for (auto prediction_history: history.prediction_histories) {
+      validate_prediction_history_linear (prediction_history);
+    }
+    assert (std::is_sorted (history.changes.begin (), history.changes.end (), field_history_type::change_compare ());
+    assert (std::is_sorted (history.existence_changes.begin (), history.existence_changes.end (), access_pointer_time_compare ());
+    //never change to something without existing.
+    //TODO: we can remove a log factor here by iterating the 2 arrays in parallel.
+    //However, writing the code for the parallel iteration here would be
+    //a very bad trade-off between performance and code complexity.
+    //TODO: find or write a good template function for this parallel iteration.
+    for (auto const & change: history.changes) {
+      assert (exists_after (history.existence_changes, change.first->time));
+    }
+  }
+  template <class field> struct validate_field_history_wrapper {
+    void apply (time_steward*steward) {steward->validate_field_history_linear <field> ();}
+  };
+  
+  void validate_everything () {
+    for (auto & thing: fiat_events) validate_event (thing.second);
+    call_for_each <validate_field_history_wrapper, physics::fields> (this);
+    
+  }
+  
+  //call callback for each field change in one steward that is not in the other,
+  //in order by time, stopping at the point where either time steward has an
+  //outstanding issue that it knows about. If callback returns a time,
+  // exit early if we pass that time.
+  template <typename Callback>
+  void find_inconsistencies_with (time_steward const & other, Callback callback) {
+    struct record {
+      field_ID ID;
+      extended_time time;
+      bool operator< (record const & other) const {return time >other.time;}
+    };
+    std::priority_queue <record> records;
+    std::unordered_map <field_ID> fields_found;
+    call_for_each <add_starting_records, physics::fields> (records, fields_found, *this);
+    call_for_each <add_starting_records, physics::fields> (records, fields_found, other);
+    extended_time stop_after = extended_time::max;
+    while (!records.empty ()) {
+      auto const & top = records.top ();
+      if (top.time >= earliest_issue_time () || top.time >= other.earliest_issue_time () || top.time >stop_after) {break;}
+      
+      records.pop ();
     }
   }
 public:
