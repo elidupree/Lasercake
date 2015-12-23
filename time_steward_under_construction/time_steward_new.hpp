@@ -913,13 +913,63 @@ class time_steward {
     
   }
   
-  //call callback for each field change in one steward that is not in the other,
-  //in order by time, stopping at the point where either time steward has an
-  //outstanding issue that it knows about. If callback returns a time,
-  // exit early if we pass that time.
-  template <typename Callback>
-  void find_inconsistencies_with (time_steward const & other, Callback callback) {
-    struct record {
+  //at the first field change in one steward that is not in the other,
+  //stopping at the point where either time steward has an
+  //outstanding issue that it knows about. 
+  auto find_first_inconsistencies_with (time_steward const & other) const {
+    extended_time best_time = extended_time::max;
+    std::unordered_map <field_ID> fields_in_either;
+    struct inconsistency {extended_time time; field_ID ID;};
+    std::vector <inconsistency> inconsistencies;
+    for (auto const & pair: fields) {fields_in_either.insert (pair.first);}
+    for (auto const & pair: other.fields) {fields_in_either.insert (pair.first);}
+    for (auto const & ID: fields_in_either) {
+      auto my_iterator = fields.find (ID);
+      auto other_iterator = other.fields.find (ID);
+      extended_time first_fail = extended_time::max;
+      if (my_iterator == fields.end ()) {
+        first_fail = other_iterator->second.changes [0]->time;
+      }
+      else if (other_iterator == fields.end ()) {
+        first_fail = my_iterator->second.changes [0]->time;
+      }
+      else {
+        auto const & my_changes = my_iterator->second.changes;
+        auto const & other_changes = other_iterator->second.changes
+        for (size_t index = 0;;++index) {
+          if (index == my_changes.size ()) {
+            if (index != other_changes.size ()) {
+              first_fail = other_changes [index]->time;
+            }
+            break;
+          }
+          else if (index == other_changes.size ()) {
+            first_fail = my_changes [index]->time;
+          }
+          else {
+            extended_time my_time = my_changes [index]->time;
+            extended_time other_time = other_changes [index]->time;
+            if (my_time != other_time) {
+              first_fail = std::min (my_time, other_time);
+              break;
+            }
+            //TODO: comparing the data
+          }
+        }
+      }
+      if (first_fail >= earliest_issue_time () || first_fail >= other.earliest_issue_time ()) {
+        continue;
+      }
+      if (first_fail <best_time) {
+        best_time = first_fail;
+        inconsistencies.clear ();
+      }
+      if (first_fail == best_time) {
+        inconsistencies.emplace_back {first_fail, ID};
+      }
+    }
+    return inconsistencies;
+    /*struct record {
       field_ID ID;
       extended_time time;
       bool operator< (record const & other) const {return time >other.time;}
@@ -934,7 +984,7 @@ class time_steward {
       if (top.time >= earliest_issue_time () || top.time >= other.earliest_issue_time () || top.time >stop_after) {break;}
       
       records.pop ();
-    }
+    }*/
   }
 public:
   void insert_fiat_event (time_type time, uint64_t distinguisher, event_function function) {
