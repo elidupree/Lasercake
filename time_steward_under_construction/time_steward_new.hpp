@@ -152,6 +152,19 @@ auto verifiably_unequal (Alpha const & alpha, Bravo const & bravo)
 ->decltype (alpha != bravo) {return alpha != bravo;}
 bool verifiably_unequal (...) {return false;}
 
+struct field_ID {
+  entity_ID entity;
+  uint32_t field_index;
+  bool operator== (field_ID const & other) const {return entity == other.entity && field_index == other.field_index;}
+};
+}//End namespace implementation
+}//end namespace time_steward_system
+namespace std {
+template <> struct hash <time_steward_system::implementation::field_ID> {public: size_t operator () (time_steward_system::implementation::field_ID const & ID) const {return std::hash <siphash_id> (ID.entity) ^ ID.field_index;}};
+}
+namespace time_steward_system {
+namespace implementation {
+
 
 //Hack: I copied the standard library implementation of upper/lower_bound,
 //in order to search a range by a different type than the type in the range,
@@ -228,42 +241,34 @@ class time_steward {
   private:  
     friend class time_steward;
     
-    template <typename field_identifier>
-    struct field_info {
-      typedef physics:: data_for <field_identifier> field_data;
-      field_data data;
+    struct field_info_base {
       bool accessed_old_state;
       bool possibly_modified;
+    };
+    template <typename field_identifier>
+    struct field_info: public field_info_base {
+      typedef physics:: data_for <field_identifier> field_data;
+      boost::optional <field_data > data;
       field_info (field_data const & data, accessed, modified):
         data (data), accessed_old_state (accessed), possibly_modified (modified) {}
     };
-    template <typename field_identifier>
-    struct field_info_map {
-      std::unordered_map <field_info <field_identifier>> data;
-    };    
-        
+
     time_steward const*steward_;
     extended_time time_;
     siphash_random_generator RNG_;
     
-    physics:: data_for_each_field <field_info_map> entities_;
+    mutable field_map <field_info_base, field_info> entities_;
     
     event_accessor (time_steward const*steward, extended_time time):
       steward_ (steward), time_(time), RNG_(time.ID) {}
     
-    template <typename field_identifier, bool mutable>
-    inline physics:: data_for <field_identifier> & get_implementation (entity_ID ID) {
-      auto & map = entities_.get <field_identifier> ();
-      auto & iterator = map.find (ID);
-      if (iterator == map.end ()) {
-        auto result = map.emplace (ID, steward_->get_provisional_field_before <field_identifier> (ID, time_), true, mutable);
-        assert (result.second);
-        iterator = result.first;
-      }
-      else if (mutable) {
-        iterator->second.possibly_modified = true;
-      }
-      return iterator->second.data;
+    template <typename field_identifier>
+    inline field_info <field_identifier> & get_field_info (entity_ID ID, bool accessed, bool modified) const {
+      auto result = entities_.get_with_default <field_identifier> (ID, [ID] () {
+        auto probe = steward_->probe_field <field_identifier, false> (ID, time_);
+        return field_info <field_identifier> (probe.value, accessed, modified);
+      });
+      if (result.second && modified) {result.first.possibly_modified = true;}
     }
     template <typename field_identifier>
     inline physics:: data_for <field_identifier> & set_implementation (entity_ID ID, physics: data_for <field_identifier> const & new_data) {
@@ -279,17 +284,31 @@ class time_steward {
 
   public:
     template <typename field_identifier>
-    inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
-      return get_implementation <field_identifier, false> (ID);
+    inline bool exists (entity_ID ID) const {
+      //theoretically, there's a distinction between accessing data
+      //and merely checking existence. However, I doubt that will be useful.
+      return bool (get_field_info (ID, true, false).data);
+    }
+    
+    template <typename field_identifier>
+    inline physics:: data_for <field_identifier> const & get (entity_ID ID) const {
+      auto & info = get_field_info (ID, true, false);
+      caller_correct_if (info.data, "you can't get() a field that doesn't exist");
+      return *info.data;
     }
     template <typename field_identifier>
     inline physics:: data_for <field_identifier> & get_mutable (entity_ID ID) {
-      return get_implementation <field_identifier, true> (ID);
+      auto & info = get_field_info (ID, true, true);
+      caller_correct_if (info.data, "you can't get_mutable() a field that doesn't exist");
+      return *info.data;
     }
-    template <typename field_identifier>
-    inline physics:: data_for <field_identifier> & set (entity_ID ID, physics:: data_for <field_identifier> const & new_data) {
-      return set_implementation <field_identifier> (ID, new_data);
+    template <typename field_identifier, typename... Arguments>
+    inline physics:: data_for <field_identifier> & set (entity_ID ID, Arguments... arguments) {
+      auto & info = get_field_info (ID, false, true);
+      info.emplace (std::forward <Arguments> (arguments)...);
+      return *info.data;
     }
+    
     uint64_t random_bits (uint32_t bits) {
       return RNG_.random_bits (bits);
     }
@@ -319,18 +338,31 @@ class time_steward {
       prediction_->valid_until () = max_extended_time;
     }
     
+    inline void not_valid_after (extended_time time) {
+      if (time < prediction_->valid_until ()) {
+        prediction_->valid_until () = time;
+        prediction_->event.function = nullptr;
+      }
+    }
   public:
     template <typename field_identifier>
     inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
       //TODO: the unordered_map is only for uniquing. As an optimization,
       //we should be able to use a boost::small_vector and a borrowed_bitset.
       fields_accessed.emplace (ID, physics:: field_index <field_identifier> ());
-      auto result = steward_->get_provisional_field_future <field_identifier> (ID, time_);
-      if (result.second < prediction_->valid_until ()) {
-        prediction_->valid_until () = result.second;
-        prediction_->event.function = nullptr;
-      }
-      return result.first;
+      auto result = steward_->probe_field <field_identifier, true> (ID, time_);
+      not_valid_after (result.end_time);
+      caller_correct_if (result.value, "you can't get() a field that doesn't exist");
+      return *result.value;
+    }
+    template <typename field_identifier>
+    inline bool exists (entity_ID ID) {
+      //TODO: the unordered_map is only for uniquing. As an optimization,
+      //we should be able to use a boost::small_vector and a borrowed_bitset.
+      fields_accessed.emplace (ID, physics:: field_index <field_identifier> ());
+      auto result = steward_->probe_field <field_identifier, true> (ID, time_);
+      not_valid_after (result.end_time);
+      return bool (result.value);
     }
     inline void predict (time_type predicted_time, event_function predicted_function) {
       if (predicted_time < time_.base_time) { return; }
@@ -377,7 +409,14 @@ class time_steward {
   public:
     template <typename field_identifier>
     inline physics:: data_for <field_identifier> const & get (entity_ID ID) {
-      return steward_->get_provisional_field_before <field_identifier> (ID, time_);
+      auto result = steward_->probe_field <field_identifier, false> (ID, time_);
+      caller_correct_if (result.value, "you can't get() a field that doesn't exist");
+      return *result.value;
+    }
+    template <typename field_identifier>
+    inline bool exists (entity_ID ID) {
+      auto result = steward_->probe_field <field_identifier, false> (ID, time_);
+      return bool (result.value);
     }
     time_type now () const {
       return time_.base_time;
@@ -396,6 +435,9 @@ class time_steward {
     typedef event_accessor*for_event;
   };
   
+  struct field_history_base {
+  
+  };
   template <typename field_identifier>
   struct field_history {
     typedef physics:: data_for <field_identifier> field_data;
@@ -421,10 +463,6 @@ class time_steward {
       return (lower_bound (changes.begin (), changes.end (), time,
         [] (extended_time const & alpha, change const & beta) {return alpha <beta.first;}) - 1)->second;
     }
-  };
-  template <typename field_data>
-  struct field_history_map {
-    std:: unordered_map <entity_ID, field_history> data;
   };
   typedef intrusive_pointer <access_info> access_pointer;
   struct prediction_history;
